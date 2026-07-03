@@ -75,7 +75,7 @@ class FakeTrainer:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="QAT eval debug — one2many")
-    parser.add_argument("--ckpt", default="./runs/detect/exp32-yolo26n-S16matmul-e2eFalse/weights/epoch3.pt")
+    parser.add_argument("--ckpt", default="./runs/detect/qat/weights/best.pt")
     parser.add_argument("--model", default="yolo26n.yaml")
     parser.add_argument("--pretrained", default="yolo26n.pt")
     parser.add_argument("--data", default="coco.yaml")

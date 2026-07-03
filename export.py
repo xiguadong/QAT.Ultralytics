@@ -582,5 +582,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-# python export.py --task segment
-# codex resume 019d0515-c4ad-7991-9fdc-a578b0446277

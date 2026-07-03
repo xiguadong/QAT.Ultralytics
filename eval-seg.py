@@ -74,7 +74,7 @@ class FakeTrainer:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="QAT seg eval")
-    parser.add_argument("--ckpt", default="./runs/segment/exp1-yolo26n-seg-S8matmul-end2endTrue/weights/best.pt")
+    parser.add_argument("--ckpt", default="./runs/segment/qat/weights/best.pt")
     parser.add_argument("--model", default="yolo26n-seg.yaml")
     parser.add_argument("--pretrained", default="./weights/yolo26n-seg.pt")
     parser.add_argument("--data", default="coco-seg.yaml")

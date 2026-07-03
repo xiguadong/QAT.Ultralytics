@@ -10,7 +10,7 @@ model.train(
     imgsz=640,
     device=2,
     project="runs/segment/",
-    name="exp1-yolo26n-seg-S8matmul-end2endTrue",
+    name="exp1",
     exist_ok=True,
     qat=True,
     qat_config="config_matmul_s8.json",
