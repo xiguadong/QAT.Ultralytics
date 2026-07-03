@@ -4,23 +4,95 @@ import json
 import time
 from pathlib import Path
 
+import axengine as ort
 import cv2
 import numpy as np
-import axengine as ort
 import torch
 import tqdm
 
 
 def coco80_to_coco91_class() -> list[int]:
     return [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-        11, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-        22, 23, 24, 25, 27, 28, 31, 32, 33, 34,
-        35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
-        46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
-        56, 57, 58, 59, 60, 61, 62, 63, 64, 65,
-        67, 70, 72, 73, 74, 75, 76, 77, 78, 79,
-        80, 81, 82, 84, 85, 86, 87, 88, 89, 90,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        27,
+        28,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        67,
+        70,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
     ]
 
 
@@ -66,9 +138,7 @@ class LetterBox:
         bottom = round(dh + 0.1)
         left = round(dw - 0.1) if self.center else 0
         right = round(dw + 0.1)
-        return cv2.copyMakeBorder(
-            image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(self.padding_value,) * 3
-        )
+        return cv2.copyMakeBorder(image, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(self.padding_value,) * 3)
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -104,7 +174,9 @@ def scale_boxes(img1_shape: tuple[int, int], boxes: torch.Tensor, img0_shape: tu
     return clip_boxes(boxes, img0_shape)
 
 
-def batched_nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray, iou_thres: float, max_det: int) -> np.ndarray:
+def batched_nms(
+    boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray, iou_thres: float, max_det: int
+) -> np.ndarray:
     if len(boxes) == 0:
         return np.array([], dtype=np.int64)
 
@@ -123,8 +195,10 @@ def batched_nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray, io
         idxs = idxs[order]
 
         cls_boxes = boxes[idxs].astype(np.float64)
-        x1 = cls_boxes[:, 0]; y1 = cls_boxes[:, 1]
-        x2 = cls_boxes[:, 2]; y2 = cls_boxes[:, 3]
+        x1 = cls_boxes[:, 0]
+        y1 = cls_boxes[:, 1]
+        x2 = cls_boxes[:, 2]
+        y2 = cls_boxes[:, 3]
         areas = (x2 - x1) * (y2 - y1)
 
         remaining = np.arange(n, dtype=np.int64)
@@ -192,14 +266,21 @@ def decode_yolo26_perscale(outputs: list[np.ndarray], imgsz: int = 640, num_clas
 
 
 class YOLO26ONNXPredictor:
-    def __init__(self, model_path: str, conf_thres: float = 0.001, iou_thres: float = 0.7, max_det: int = 300, max_nms: int = 30000):
+    def __init__(
+        self,
+        model_path: str,
+        conf_thres: float = 0.001,
+        iou_thres: float = 0.7,
+        max_det: int = 300,
+        max_nms: int = 30000,
+    ):
         self.model_path = model_path
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.max_det = max_det
         self.max_nms = max_nms
         self.cls_map = coco80_to_coco91_class()
-   
+
         self.session = ort.InferenceSession(model_path, providers=["AxEngineExecutionProvider"])
         input_meta = self.session.get_inputs()[0]
         self.input_name = input_meta.name
@@ -281,7 +362,9 @@ class YOLO26ONNXPredictor:
 
 def parse_args():
     root = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description="Standalone evaluator for QAT yolo26 model (qat_exp24_one2many_slim.onnx).")
+    parser = argparse.ArgumentParser(
+        description="Standalone evaluator for QAT yolo26 model (qat_exp24_one2many_slim.onnx)."
+    )
     parser.add_argument(
         "--model",
         type=str,

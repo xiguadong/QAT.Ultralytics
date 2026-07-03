@@ -4,10 +4,11 @@ from ultralytics import YOLO
 model = YOLO("yolo11n.yaml")
 
 # Run batched inference on a list of images
-results = model(["bus.jpg"],
-                qat_onnx_imgsz=[640,640],
-                qat_pt_path='./runs/detect/qat/weights/last.pt',
-                )
+results = model(
+    ["bus.jpg"],
+    qat_onnx_imgsz=[640, 640],
+    qat_pt_path="./runs/detect/qat/weights/last.pt",
+)
 
 # Process results list
 for result in results:

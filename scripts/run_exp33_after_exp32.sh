@@ -19,42 +19,42 @@ echo "============================================================"
 # ---------------------------------------------------------------------------
 # 检测 exp32 是否完成
 # ---------------------------------------------------------------------------
-POLL_INTERVAL=60  # 秒
+POLL_INTERVAL=60 # 秒
 
 while true; do
-    # 检查是否有 exp32 相关的 training 进程在运行
-    # train.py 进程特征：python ... train.py
-    RUNNING_COUNT=$(ps aux | grep -E "python.*train\.py" | grep -v grep | wc -l)
+  # 检查是否有 exp32 相关的 training 进程在运行
+  # train.py 进程特征：python ... train.py
+  RUNNING_COUNT=$(ps aux | grep -E "python.*train\.py" | grep -v grep | wc -l)
 
-    # 检查 epoch 50 是否已保存（即 epoch49.pt 存在，0-indexed）
-    EPOCH49_EXISTS=""
-    if [ -f "${EXP32_DIR}/weights/epoch49.pt" ]; then
-        EPOCH49_EXISTS="yes"
+  # 检查 epoch 50 是否已保存（即 epoch49.pt 存在，0-indexed）
+  EPOCH49_EXISTS=""
+  if [ -f "${EXP32_DIR}/weights/epoch49.pt" ]; then
+    EPOCH49_EXISTS="yes"
+  fi
+
+  # 检查 results.csv 的行数（表头 + 50 行 = 51 行表示完成）
+  CSV_LINES=0
+  if [ -f "${EXP32_DIR}/results.csv" ]; then
+    CSV_LINES=$(wc -l < "${EXP32_DIR}/results.csv")
+  fi
+
+  NOW=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[${NOW}] 进程数=${RUNNING_COUNT}, epoch49.pt=${EPOCH49_EXISTS:-no}, csv行数=${CSV_LINES}"
+
+  # 判断完成条件：没有 train.py 进程在运行 且 (epoch49.pt 存在 或 csv 行数 >= 51)
+  if [ "${RUNNING_COUNT}" -eq 0 ]; then
+    if [ "${EPOCH49_EXISTS}" = "yes" ] || [ "${CSV_LINES}" -ge 51 ]; then
+      echo ""
+      echo "============================================================"
+      echo "[$(date)] exp32 训练已完成！开始启动 exp33..."
+      echo "============================================================"
+      break
+    else
+      echo "[$(date)] 警告：进程已退出但未检测到完成标志，继续等待..."
     fi
+  fi
 
-    # 检查 results.csv 的行数（表头 + 50 行 = 51 行表示完成）
-    CSV_LINES=0
-    if [ -f "${EXP32_DIR}/results.csv" ]; then
-        CSV_LINES=$(wc -l < "${EXP32_DIR}/results.csv")
-    fi
-
-    NOW=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${NOW}] 进程数=${RUNNING_COUNT}, epoch49.pt=${EPOCH49_EXISTS:-no}, csv行数=${CSV_LINES}"
-
-    # 判断完成条件：没有 train.py 进程在运行 且 (epoch49.pt 存在 或 csv 行数 >= 51)
-    if [ "${RUNNING_COUNT}" -eq 0 ]; then
-        if [ "${EPOCH49_EXISTS}" = "yes" ] || [ "${CSV_LINES}" -ge 51 ]; then
-            echo ""
-            echo "============================================================"
-            echo "[$(date)] exp32 训练已完成！开始启动 exp33..."
-            echo "============================================================"
-            break
-        else
-            echo "[$(date)] 警告：进程已退出但未检测到完成标志，继续等待..."
-        fi
-    fi
-
-    sleep "${POLL_INTERVAL}"
+  sleep "${POLL_INTERVAL}"
 done
 
 # ---------------------------------------------------------------------------

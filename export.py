@@ -11,8 +11,6 @@ from torch.export import Dim
 
 from ultralytics import YOLO
 from ultralytics.utils.ax_quantizer import AXQuantizer, ax_load_config
-import ultralytics.utils.quantized_decomposed_dequantize_per_channel
-
 
 warnings.filterwarnings("ignore", message=r"erase_node\(batch_norm_.*")
 
@@ -54,13 +52,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", choices=sorted(DEFAULT_EXPORTS), default="detect")
     parser.add_argument("--model", default=None, help="Model yaml path.")
     parser.add_argument("--pretrained", default="yolo26n.pt", help="Float pretrained weights path.")
-    parser.add_argument("--qat-weights", dest="qat_weights",
-                        default="runs/detect/exp32-yolo26n-S16matmul-e2eFalse/weights/best.pt",
-                        help="QAT checkpoint path.")
+    parser.add_argument(
+        "--qat-weights",
+        dest="qat_weights",
+        default="runs/detect/exp32-yolo26n-S16matmul-e2eFalse/weights/best.pt",
+        help="QAT checkpoint path.",
+    )
     parser.add_argument("--out", default="./yolo26_onnx/qat_exp32_one2many.onnx", help="ONNX output path.")
-    parser.add_argument("--qat-state-out", dest="qat_state_out",
-                        default="./yolo26_onnx/qat_exp32_one2many.pth",
-                        help="Saved QAT state dict path.")
+    parser.add_argument(
+        "--qat-state-out",
+        dest="qat_state_out",
+        default="./yolo26_onnx/qat_exp32_one2many.pth",
+        help="Saved QAT state dict path.",
+    )
     parser.add_argument("--quant-config", dest="quant_config", default="./config.json", help="Quant config path.")
     parser.add_argument("--device", default="cuda", help="Export device.")
     parser.add_argument(
@@ -92,9 +96,12 @@ class DetectOne2OneWrapper(torch.nn.Module):
         o2o = preds.get("one2one", preds)
         if isinstance(o2o, list):
             return (
-                o2o[0]["boxes"], o2o[0]["scores"],
-                o2o[1]["boxes"], o2o[1]["scores"],
-                o2o[2]["boxes"], o2o[2]["scores"],
+                o2o[0]["boxes"],
+                o2o[0]["scores"],
+                o2o[1]["boxes"],
+                o2o[1]["scores"],
+                o2o[2]["boxes"],
+                o2o[2]["scores"],
             )
         return o2o["boxes"], o2o["scores"]
 
@@ -111,9 +118,12 @@ class DetectOne2ManyWrapper(torch.nn.Module):
         o2m = preds.get("one2many", preds)
         if isinstance(o2m, list):
             return (
-                o2m[0]["boxes"], o2m[0]["scores"],
-                o2m[1]["boxes"], o2m[1]["scores"],
-                o2m[2]["boxes"], o2m[2]["scores"],
+                o2m[0]["boxes"],
+                o2m[0]["scores"],
+                o2m[1]["boxes"],
+                o2m[1]["scores"],
+                o2m[2]["boxes"],
+                o2m[2]["scores"],
             )
         return o2m["boxes"], o2m["scores"]
 
@@ -214,7 +224,8 @@ def build_quantized_model(cfg: ExportDefaults, quant_config: str, device: str, q
     inputs = torch.rand(*qat_onnx_imgsz, device=device)
     print("start export!")
     exported_model = torch.export.export_for_training(
-        float_model, (inputs,),
+        float_model,
+        (inputs,),
         dynamic_shapes={"x": {0: 1, 2: Dim.AUTO, 3: Dim.AUTO}},
     )
     print("export training model done!")
@@ -254,13 +265,21 @@ def build_export_plan(task: str, quantized_model: torch.nn.Module, inputs: torch
     if task == "detect":
         if end2end:
             return DetectOne2OneWrapper(quantized_model), [
-                "boxes_p3", "scores_p3", "boxes_p4", "scores_p4", "boxes_p5", "scores_p5",
+                "boxes_p3",
+                "scores_p3",
+                "boxes_p4",
+                "scores_p4",
+                "boxes_p5",
+                "scores_p5",
             ]
         else:
             return DetectOne2ManyWrapper(quantized_model), [
-                "boxes_p3", "scores_p3",
-                "boxes_p4", "scores_p4",
-                "boxes_p5", "scores_p5",
+                "boxes_p3",
+                "scores_p3",
+                "boxes_p4",
+                "scores_p4",
+                "boxes_p5",
+                "scores_p5",
             ]
     if task == "segment":
         proto_names = get_segment_proto_names(sample_outputs["one2one"]["proto"])
@@ -280,10 +299,9 @@ def build_export_plan(task: str, quantized_model: torch.nn.Module, inputs: torch
 def _fix_qdq_qdq_mismatch(model: onnx.ModelProto, threshold: float = 1.02) -> int:
     """Insert Identity (requant) nodes between adjacent Q-DQ pairs with mismatched quantization.
 
-    In a Q→DQ→Q chain, if the first Q's scale and the second Q's scale differ beyond
-    ``threshold`` (or their zero_points differ), deployment tools cannot fuse them into a
-    single requant operation.  Inserting an explicit Identity node severs the adjacency and
-    marks the position where a **requant** (dequantize→requantize) is required.
+    In a Q→DQ→Q chain, if the first Q's scale and the second Q's scale differ beyond ``threshold`` (or their zero_points
+    differ), deployment tools cannot fuse them into a single requant operation. Inserting an explicit Identity node
+    severs the adjacency and marks the position where a **requant** (dequantize→requantize) is required.
     """
     import numpy as np
     from onnx import helper
@@ -294,10 +312,12 @@ def _fix_qdq_qdq_mismatch(model: onnx.ModelProto, threshold: float = 1.02) -> in
     for dq_node in model.graph.node:
         if dq_node.op_type != "DequantizeLinear":
             continue
-        q_first = next((n for n in model.graph.node
-                       if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None)
-        q_second = next((n for n in model.graph.node
-                        if n.op_type == "QuantizeLinear" and dq_node.output[0] in n.input), None)
+        q_first = next(
+            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None
+        )
+        q_second = next(
+            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and dq_node.output[0] in n.input), None
+        )
         if q_first is None or q_second is None:
             continue
 
@@ -348,8 +368,8 @@ def _fix_qdq_qdq_mismatch(model: onnx.ModelProto, threshold: float = 1.02) -> in
 def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int:
     """Merge adjacent DQ→Q pairs with nearly identical scales into a single pass-through.
 
-    PT2E may insert redundant DQ→Q pairs between adjacent layers when their observer scales
-    differ slightly (< 2%). These pairs are a no-op passthrough that can be eliminated.
+    PT2E may insert redundant DQ→Q pairs between adjacent layers when their observer scales differ slightly (< 2%).
+    These pairs are a no-op passthrough that can be eliminated.
     """
     import numpy as np
 
@@ -362,8 +382,9 @@ def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int
             continue
 
         # Find Q that directly consumes this DQ output
-        q_next = next((n for n in model.graph.node
-                       if n.op_type == "QuantizeLinear" and dq_node.output[0] == n.input[0]), None)
+        q_next = next(
+            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and dq_node.output[0] == n.input[0]), None
+        )
         if q_next is None:
             continue
 
@@ -373,8 +394,9 @@ def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int
             continue
 
         # Find Q that feeds this DQ
-        q_prev = next((n for n in model.graph.node
-                       if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None)
+        q_prev = next(
+            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None
+        )
         if q_prev is None:
             continue
 
@@ -470,22 +492,19 @@ def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int
 def _split_shared_mul_dequant(model: onnx.ModelProto) -> int:
     """Split DequantizeLinear nodes that feed into multiple Mul ops.
 
-    When a single DQ output is consumed by two or more Mul nodes, deployment
-    tools may fail to relate the separate DQ→Mul→Q chains back to a shared
-    quantized tensor.  Creating per-Mul copies of the DQ resolves this.
+    When a single DQ output is consumed by two or more Mul nodes, deployment tools may fail to relate the separate
+    DQ→Mul→Q chains back to a shared quantized tensor. Creating per-Mul copies of the DQ resolves this.
     """
-    import numpy as np
     from onnx import helper
 
-    init_dict = {i.name: onnx.numpy_helper.to_array(i) for i in model.graph.initializer}
+    {i.name: onnx.numpy_helper.to_array(i) for i in model.graph.initializer}
     new_nodes = []
     split_count = 0
 
     for dq_node in model.graph.node:
         if dq_node.op_type != "DequantizeLinear":
             continue
-        mul_consumers = [n for n in model.graph.node
-                         if n.op_type == "Mul" and dq_node.output[0] in n.input]
+        mul_consumers = [n for n in model.graph.node if n.op_type == "Mul" and dq_node.output[0] in n.input]
         if len(mul_consumers) <= 1:
             continue
 

@@ -9,13 +9,14 @@
 
 ## 1. 三种集成方式对比
 
-| 方式 | 时机 | 改动量 | 风险 | 可行性 |
-|------|------|:---:|:---:|:---:|
-| **A. QAT 训练内嵌** | 每 epoch 后更新 observer scale | 大（需 Hook PT2E observer state、适配 PPQ→PT2E 图 IR） | 高 | 低。QAT 权重在变，scale 不断重搜，边际收益小 |
-| **B. convert 后/export 前** | `convert_pt2e` 后修改 Q/DQ scale，再导出 ONNX | 中（需拦截 PT2E 图节点、dequantize/forward/search/update） | 中 | 中。PT2E 内部 op 操作复杂，且每次导出须重跑校准 |
-| **C. ONNX 后处理（推荐）** | ONNX slim 清理后，改 3 个检测头 DQ 的 scale 初始器 | 小（3 个 initializer 替换，不碰图结构） | 零 | **高**。解耦训练/导出/校准，可对比前后 mAP，失败零风险 |
+| 方式                        | 时机                                               |                           改动量                           | 风险 |                         可行性                         |
+| --------------------------- | -------------------------------------------------- | :--------------------------------------------------------: | :--: | :----------------------------------------------------: |
+| **A. QAT 训练内嵌**         | 每 epoch 后更新 observer scale                     |   大（需 Hook PT2E observer state、适配 PPQ→PT2E 图 IR）   |  高  |      低。QAT 权重在变，scale 不断重搜，边际收益小      |
+| **B. convert 后/export 前** | `convert_pt2e` 后修改 Q/DQ scale，再导出 ONNX      | 中（需拦截 PT2E 图节点、dequantize/forward/search/update） |  中  |    中。PT2E 内部 op 操作复杂，且每次导出须重跑校准     |
+| **C. ONNX 后处理（推荐）**  | ONNX slim 清理后，改 3 个检测头 DQ 的 scale 初始器 |          小（3 个 initializer 替换，不碰图结构）           |  零  | **高**。解耦训练/导出/校准，可对比前后 mAP，失败零风险 |
 
 **选择方案 C**，理由：
+
 - 校准与训练完全解耦，不增加 QAT 训练复杂度
 - ONNX 图结构已稳定（slim + fix_QDQ + merge_DQ 后），只改 scale 值
 - 若 Fisher 提点有效，直接保存优化后 ONNX；若无效，保留原始 ONNX，零回退成本
@@ -45,6 +46,7 @@ export.py → build_quantized_model() → convert_pt2e() → export_onnx()
 用 COCO val 子集（建议 64–128 batch）跑浮点参考 ONNX 推理，收集 3 个检测头输出的 float logits `x_f`。
 
 对每个 scale 的输出张量 `x` [1, 255, H, W]：
+
 - 计算 `gate = σ(x_obj)`（obj 通道概率，前景门控）
 - 计算 `σ'(x)²`（sigmoid 导数平方，概率敏感区加权）
 - 计算 `r`：box(0:3)=w_box, obj(4)=w_obj, argmax-cls(5:)=w_cls, 其余=0
@@ -79,17 +81,16 @@ s* = argmin_s Σ_i w_i · (x_i − Q_s(x_i))²
 
 ```python
 def replace_dq_scale(onnx_model, node_name, new_scale):
-    """替换 ONNX 图中指定 DequantizeLinear 节点的 scale 初始器。"""
+    """替换 ONNX 图中指定 DequantizeLinear 节点的 scale 初始器。."""
     import numpy as np
     from onnx import numpy_helper
+
     for node in onnx_model.graph.node:
         if node.name == node_name and node.op_type == "DequantizeLinear":
             scale_name = node.input[1]
             for init in onnx_model.graph.initializer:
                 if init.name == scale_name:
-                    new_tensor = numpy_helper.from_array(
-                        np.array([new_scale], dtype=np.float32), name=scale_name
-                    )
+                    new_tensor = numpy_helper.from_array(np.array([new_scale], dtype=np.float32), name=scale_name)
                     init.CopyFrom(new_tensor)
                     print(f"  {node_name}: scale {float(numpy_helper.to_array(init)[0]):.6f} -> {new_scale:.6f}")
                     return True
@@ -108,10 +109,10 @@ def replace_dq_scale(onnx_model, node_name, new_scale):
 
 ## 4. 预期效果
 
-| 指标 | 当前 (exp32 best) | 预期 (Fisher 后) | 来源 |
-|------|:---:|:---:|------|
-| mAP50-95 | 39.82 | **≥ 39.9**（目标） | 论文 +0.4 mAP（yolov5s），yolo26n 比例换算 |
-| mAP@.75 | — | 预计追赶浮点 | 论文 mAP@.75 追平 FP32 |
+| 指标     | 当前 (exp32 best) |  预期 (Fisher 后)  | 来源                                       |
+| -------- | :---------------: | :----------------: | ------------------------------------------ |
+| mAP50-95 |       39.82       | **≥ 39.9**（目标） | 论文 +0.4 mAP（yolov5s），yolo26n 比例换算 |
+| mAP@.75  |         —         |    预计追赶浮点    | 论文 mAP@.75 追平 FP32                     |
 
 论文数据（yolov5s, INT8）：均匀 MSE → 0.363 mAP, +Fisher → 0.367 mAP, 检测头 FP32 上界 = 0.369。Fisher 仅改 3 个输出 scale（不改位宽、不改权重），抢回检测头量化损失 ~67%。
 
@@ -122,6 +123,7 @@ yolo26n 的检测头量化损耗占比与 yolov5s 可类比，保守预期 +0.08
 ## 5. 推广方向（后续实验）
 
 当前 Fisher 仅作用于检测头输出层。论文推导可推广到**全网层**：
+
 - 将检测头输出 Fisher 权重 `W_o` 沿网络 Gaussian-Newton 反传
 - 对上游激活 `x_i`，其任务重要性 = `Σ_o W_o · (∂o/∂x_i)²`
 - 用 Hutchinson 随机投影估计 Jacobian，得到每层 Fisher 权重
@@ -133,8 +135,8 @@ yolo26n 的检测头量化损耗占比与 yolov5s 可类比，保守预期 +0.08
 
 ## 6. 文件清单
 
-| 文件 | 作用 |
-|------|------|
-| `taskaware_detect.py` | 核心实现（PPQ 版），两个入口：`fisher_detect_refine`（自动 Fisher 权重）、`taskaware_detect_refine`（手动 w_box/w_obj/w_cls） |
-| `task_aware_ifmr_derivation.md` | 理论推导文档 |
-| `integration_plan.md` | 本文件——PT2E QAT 集成方案 |
+| 文件                            | 作用                                                                                                                          |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `taskaware_detect.py`           | 核心实现（PPQ 版），两个入口：`fisher_detect_refine`（自动 Fisher 权重）、`taskaware_detect_refine`（手动 w_box/w_obj/w_cls） |
+| `task_aware_ifmr_derivation.md` | 理论推导文档                                                                                                                  |
+| `integration_plan.md`           | 本文件——PT2E QAT 集成方案                                                                                                     |

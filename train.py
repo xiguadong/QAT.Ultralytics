@@ -9,7 +9,7 @@ model.train(
     epochs=50,
     imgsz=640,
     device=2,
-    project='runs/detect/',
+    project="runs/detect/",
     name="exp34-yolo26n-S8matmul-noEMA",
     exist_ok=True,
     qat=True,

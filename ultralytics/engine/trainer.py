@@ -759,6 +759,7 @@ class BaseTrainer:
             self.ema.update(self.model)
         if self.qat_model is not None and self.qat_ema is None and getattr(self.args, "qat_ema", True):
             from ultralytics.utils.torch_utils import ModelEMA
+
             self.qat_ema = ModelEMA(self.qat_model, decay=0.9999, tau=2000)
         if self.qat_ema is not None:
             self.qat_ema.update(self.qat_model)

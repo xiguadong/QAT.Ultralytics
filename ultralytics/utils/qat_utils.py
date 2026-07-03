@@ -12,7 +12,9 @@ from ultralytics.utils.ax_quantizer import AXQuantizer, ax_load_config
 def _load_quantizer(use_lsq: bool = False):
     """Load the appropriate quantizer module."""
     if use_lsq:
-        from ultralytics.utils.ax_quantizer_lsq import AXQuantizer as LSQQuantizer, ax_load_config as lsq_load_config
+        from ultralytics.utils.ax_quantizer_lsq import AXQuantizer as LSQQuantizer
+        from ultralytics.utils.ax_quantizer_lsq import ax_load_config as lsq_load_config
+
         return LSQQuantizer, lsq_load_config
     return AXQuantizer, ax_load_config
 
@@ -37,18 +39,17 @@ def prepare_pt2e_qat_model(
     input_name: str = "x",
     use_lsq: bool = False,
 ) -> tuple[torch.fx.GraphModule, torch.fx.GraphModule]:
-    """
-    Export a training graph and prepare a PT2E QAT model.
+    """Export a training graph and prepare a PT2E QAT model.
 
-    All dimensions (batch, H, W) use ``Dim.AUTO`` so the exported model accepts
-    variable spatial sizes (needed for ``rect=True`` validation and deployment).
+    All dimensions (batch, H, W) use ``Dim.AUTO`` so the exported model accepts variable spatial sizes (needed for
+    ``rect=True`` validation and deployment).
     """
     height, width = _normalize_imgsz(imgsz)
     max_batch = max(int(dynamic_batch_max), 2)
     example_batch = min(2, max_batch)
 
     QuantizerClass, load_config = _load_quantizer(use_lsq)
-    
+
     inputs = torch.rand(example_batch, 3, height, width, device=device).contiguous()
     global_config, regional_configs = load_config(str(config_path))
     quantizer = QuantizerClass()

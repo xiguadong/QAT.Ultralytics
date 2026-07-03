@@ -511,7 +511,13 @@ class v8SegmentationLoss(v8DetectionLoss):
         self.overlap = model.args.overlap_mask
         self.bcedice_loss = BCEDiceLoss(weight_bce=0.5, weight_dice=0.5)
 
-    def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor], teacher_preds: dict[str, torch.Tensor] | None = None, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+    def loss(
+        self,
+        preds: dict[str, torch.Tensor],
+        batch: dict[str, torch.Tensor],
+        teacher_preds: dict[str, torch.Tensor] | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate and return the combined loss for detection and segmentation."""
         pred_masks, proto = preds["mask_coefficient"].permute(0, 2, 1).contiguous(), preds["proto"]
         loss = torch.zeros(5, device=self.device)  # box, seg, cls, dfl, semseg
@@ -1203,18 +1209,42 @@ class E2ELoss:
         teacher_preds = None if teacher_preds is None else self.one2many.parse_output(teacher_preds)
         one2many, one2one = preds["one2many"], preds["one2one"]
 
-        one2many['boxes'] = torch.cat(one2many['boxes'], dim=-1) if isinstance(one2many['boxes'], list) else one2many['boxes']
-        one2many['scores'] = torch.cat(one2many['scores'], dim=-1) if isinstance(one2many['scores'], list) else one2many['scores']
-        one2one['boxes'] = torch.cat(one2one['boxes'], dim=-1) if isinstance(one2one['boxes'], list) else one2one['boxes']
-        one2one['scores'] = torch.cat(one2one['scores'], dim=-1) if isinstance(one2one['scores'], list) else one2one['scores']
+        one2many["boxes"] = (
+            torch.cat(one2many["boxes"], dim=-1) if isinstance(one2many["boxes"], list) else one2many["boxes"]
+        )
+        one2many["scores"] = (
+            torch.cat(one2many["scores"], dim=-1) if isinstance(one2many["scores"], list) else one2many["scores"]
+        )
+        one2one["boxes"] = (
+            torch.cat(one2one["boxes"], dim=-1) if isinstance(one2one["boxes"], list) else one2one["boxes"]
+        )
+        one2one["scores"] = (
+            torch.cat(one2one["scores"], dim=-1) if isinstance(one2one["scores"], list) else one2one["scores"]
+        )
 
         teacher_one2many = None if teacher_preds is None else teacher_preds["one2many"]
         teacher_one2one = None if teacher_preds is None else teacher_preds["one2one"]
         if teacher_one2many is not None:
-            teacher_one2many['boxes'] = torch.cat(teacher_one2many['boxes'], dim=-1) if isinstance(teacher_one2many['boxes'], list) else teacher_one2many['boxes']
-            teacher_one2many['scores'] = torch.cat(teacher_one2many['scores'], dim=-1) if isinstance(teacher_one2many['scores'], list) else teacher_one2many['scores']
-            teacher_one2one['boxes'] = torch.cat(teacher_one2one['boxes'], dim=-1) if isinstance(teacher_one2one['boxes'], list) else teacher_one2one['boxes']
-            teacher_one2one['scores'] = torch.cat(teacher_one2one['scores'], dim=-1) if isinstance(teacher_one2one['scores'], list) else teacher_one2one['scores']
+            teacher_one2many["boxes"] = (
+                torch.cat(teacher_one2many["boxes"], dim=-1)
+                if isinstance(teacher_one2many["boxes"], list)
+                else teacher_one2many["boxes"]
+            )
+            teacher_one2many["scores"] = (
+                torch.cat(teacher_one2many["scores"], dim=-1)
+                if isinstance(teacher_one2many["scores"], list)
+                else teacher_one2many["scores"]
+            )
+            teacher_one2one["boxes"] = (
+                torch.cat(teacher_one2one["boxes"], dim=-1)
+                if isinstance(teacher_one2one["boxes"], list)
+                else teacher_one2one["boxes"]
+            )
+            teacher_one2one["scores"] = (
+                torch.cat(teacher_one2one["scores"], dim=-1)
+                if isinstance(teacher_one2one["scores"], list)
+                else teacher_one2one["scores"]
+            )
 
         loss_one2many = self.one2many.loss(one2many, batch, teacher_preds=teacher_one2many)
         loss_one2one = self.one2one.loss(one2one, batch, teacher_preds=teacher_one2one)

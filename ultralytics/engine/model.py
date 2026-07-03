@@ -25,7 +25,6 @@ from ultralytics.utils import (
     callbacks,
     checks,
 )
-import ultralytics.utils.quantized_decomposed_dequantize_per_channel
 from ultralytics.utils.qat_utils import prepare_pt2e_qat_model
 
 
@@ -841,6 +840,7 @@ class Model(torch.nn.Module):
         ckpt_qat_ema = self.ckpt.get("qat_ema") if isinstance(self.ckpt, dict) else None
         if ckpt_qat_ema is not None and effective_args.get("qat_ema", True):
             from ultralytics.utils.torch_utils import ModelEMA
+
             self.trainer.qat_ema = ModelEMA(prepared_model, decay=0.9999, tau=2000)
             self.trainer.qat_ema.ema.load_state_dict(ckpt_qat_ema)
             self.trainer.qat_ema.updates = self.ckpt.get("qat_ema_updates", 0)

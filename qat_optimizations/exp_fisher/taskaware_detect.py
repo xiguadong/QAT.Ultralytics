@@ -1,4 +1,4 @@
-"""T1: 检测头输出激活的"任务加权"IFMR 校准。
+"""T1: 检测头输出激活的"任务加权"IFMR 校准。.
 
 3 个检测头 conv 的输出激活是 per-tensor 量化(ACTIVATED)、覆盖 255=3×85 通道，
 被占 ~95% 误差的类别通道主导。本模块对这 3 个输出 scale 用**通道加权 MSE** 重新搜索：
@@ -6,16 +6,16 @@
 通道权重按 c%85 分组：box(0-3)=w_box, obj(4)=w_obj, cls(5-84)=w_cls。
 压低 w_cls → scale 偏向保住 box/obj（牺牲类别幅度）。非破坏性，只改校准 scale。
 """
-import torch
 
+import torch
 from quant.ppq.core import QuantizationStates
 from quant.ppq.executor import TorchExecutor
 from quant.ppq.IR import QuantableOperation
-from quant.ppq.quantization.qfunction.linear import PPQLinearQuantFunction
 
 
 def find_detect_convs(graph):
-    """从图输出回溯最近的 Conv（255 通道检测头）。"""
+    """从图输出回溯最近的 Conv（255 通道检测头）。."""
+
     def src(var):
         return getattr(var, "source_op", None)
 
@@ -41,7 +41,7 @@ def find_detect_convs(graph):
 
 
 def set_detect_weights_fp32(quant_graph, float_graph):
-    """诊断: 把 3 个检测头 conv 的权重换回浮点(从 float_graph 取)并设 FP32, 隔离权重量化损失。"""
+    """诊断: 把 3 个检测头 conv 的权重换回浮点(从 float_graph 取)并设 FP32, 隔离权重量化损失。."""
     from quant.ppq.core import QuantizationStates
 
     fmap = {c.name: c for c in find_detect_convs(float_graph)}
@@ -60,15 +60,25 @@ def _sigmoid_deriv(z):
 
 
 @torch.no_grad()
-def fisher_detect_refine(graph, dataloader, collate_fn, device="cpu", no=85,
-                         gate_thresh=0.05, s_lo=0.25, s_hi=1.8, s_step=0.01,
-                         w_box=1.0, w_obj=1.0, w_cls=1.0, max_batches=64, verbose=False):
-    """推导出的任务感知 cost: 对 3 个检测头输出 scale，
-    搜 s 最小化 Σ_i w_i·(x_i - Q_s(x_i))²，其中 w_i = gate_a · σ'(x_{f,i})² · r_component。
-      gate_a = σ(obj_f)          (前景门控, 背景自动≈0)
-      σ'(z)=σ(z)(1-σ(z))         (量化在 logit, 任务在概率 → 概率敏感区加权)
-      r: box/obj/argmax-cls 有权, 非argmax的79类自动=0
-    只在前景 anchor-location 上收集元素（背景权重≈0, 直接丢弃以省内存并聚焦）。
+def fisher_detect_refine(
+    graph,
+    dataloader,
+    collate_fn,
+    device="cpu",
+    no=85,
+    gate_thresh=0.05,
+    s_lo=0.25,
+    s_hi=1.8,
+    s_step=0.01,
+    w_box=1.0,
+    w_obj=1.0,
+    w_cls=1.0,
+    max_batches=64,
+    verbose=False,
+):
+    """推导出的任务感知 cost: 对 3 个检测头输出 scale， 搜 s 最小化 Σ_i w_i·(x_i - Q_s(x_i))²，其中 w_i = gate_a · σ'(x_{f,i})² · r_component。
+    gate_a = σ(obj_f) (前景门控, 背景自动≈0) σ'(z)=σ(z)(1-σ(z)) (量化在 logit, 任务在概率 → 概率敏感区加权) r: box/obj/argmax-cls 有权,
+    非argmax的79类自动=0 只在前景 anchor-location 上收集元素（背景权重≈0, 直接丢弃以省内存并聚焦）。.
     """
     convs = find_detect_convs(graph)
     names = [c.outputs[0].name for c in convs]
@@ -77,7 +87,7 @@ def fisher_detect_refine(graph, dataloader, collate_fn, device="cpu", no=85,
         if isinstance(op, QuantableOperation):
             op.dequantize(activation_only=True)
     fexec = TorchExecutor(gf, device=device)
-    in_name = [k for k in gf.inputs][0]
+    next(iter(gf.inputs))
     store = {n: {"x": [], "w": []} for n in names}
 
     for i, batch in enumerate(dataloader):
@@ -89,18 +99,18 @@ def fisher_detect_refine(graph, dataloader, collate_fn, device="cpu", no=85,
             C = o.shape[1]
             A = C // no
             oo = o.reshape(A, no, o.shape[2], o.shape[3])  # [A,85,H,W] logits
-            gate = torch.sigmoid(oo[:, 4])                 # [A,H,W] objectness 概率
+            gate = torch.sigmoid(oo[:, 4])  # [A,H,W] objectness 概率
             fg = gate > gate_thresh
             if fg.sum() == 0:
                 continue
-            sigp2 = _sigmoid_deriv(oo) ** 2                 # [A,85,H,W]
+            sigp2 = _sigmoid_deriv(oo) ** 2  # [A,85,H,W]
             r = torch.zeros_like(oo)
             r[:, 0:4] = w_box
             r[:, 4] = w_obj
-            amax = oo[:, 5:].argmax(dim=1, keepdim=True)    # [A,1,H,W]
+            amax = oo[:, 5:].argmax(dim=1, keepdim=True)  # [A,1,H,W]
             onehot = torch.zeros_like(oo[:, 5:]).scatter_(1, amax, 1.0)
             r[:, 5:] = w_cls * onehot
-            w = gate.unsqueeze(1) * sigp2 * r              # [A,85,H,W]
+            w = gate.unsqueeze(1) * sigp2 * r  # [A,85,H,W]
             fgm = fg.unsqueeze(1).expand_as(w)
             store[n]["x"].append(oo[fgm].flatten().cpu())
             store[n]["w"].append(w[fgm].flatten().cpu())
@@ -138,20 +148,33 @@ def fisher_detect_refine(graph, dataloader, collate_fn, device="cpu", no=85,
 
 
 @torch.no_grad()
-def taskaware_detect_refine(graph, dataloader, collate_fn, device="cpu",
-                            w_box=1.0, w_obj=1.0, w_cls=1.0, no=85,
-                            s_lo=0.3, s_hi=1.6, s_step=0.02, max_batches=64, sub=2048, verbose=False):
+def taskaware_detect_refine(
+    graph,
+    dataloader,
+    collate_fn,
+    device="cpu",
+    w_box=1.0,
+    w_obj=1.0,
+    w_cls=1.0,
+    no=85,
+    s_lo=0.3,
+    s_hi=1.6,
+    s_step=0.02,
+    max_batches=64,
+    sub=2048,
+    verbose=False,
+):
     convs = find_detect_convs(graph)
     names = [c.outputs[0].name for c in convs]
 
     # 浮点检测头输出（独立浮点图，按通道保留，spatial 子采样）
-    quant_ops = [op for op in graph.operations.values() if isinstance(op, QuantableOperation)]
+    [op for op in graph.operations.values() if isinstance(op, QuantableOperation)]
     gf = graph.copy()
     for op in gf.operations.values():
         if isinstance(op, QuantableOperation):
             op.dequantize(activation_only=True)
     fexec = TorchExecutor(gf, device=device)
-    in_name = [k for k in gf.inputs][0]
+    next(iter(gf.inputs))
     cache = {n: [] for n in names}
     g = torch.Generator().manual_seed(123)
     for i, batch in enumerate(dataloader):

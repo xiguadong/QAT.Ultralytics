@@ -15,15 +15,14 @@ from types import SimpleNamespace
 
 import torch
 
+import ultralytics.utils.quantized_decomposed_dequantize_per_channel  # noqa: F401
 from ultralytics import YOLO
 from ultralytics.data.build import build_dataloader, build_yolo_dataset
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.models.yolo.detect.val import DetectionValidator
-from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER
-from ultralytics.utils.ax_quantizer import AXQuantizer, ax_load_config
-from ultralytics.utils.torch_utils import select_device
+from ultralytics.utils import DEFAULT_CFG_DICT
 from ultralytics.utils.qat_utils import prepare_pt2e_qat_model
-import ultralytics.utils.quantized_decomposed_dequantize_per_channel  # noqa: F401
+from ultralytics.utils.torch_utils import select_device
 
 warnings.filterwarnings("ignore")
 
@@ -51,17 +50,26 @@ class FakeTrainer:
         self.epoch = 0
         self.epochs = 1
         from collections import namedtuple
+
         self.stopper = namedtuple("Stopper", ["possible_stop"])(possible_stop=False)
         self.args = argparse.Namespace(
-            half=False, amp=False, compile=False, plots=False, end2end=False,
-            conf=0.001, iou=0.7, max_det=300, single_cls=False, agnostic_nms=False,
-            save_json=False, save_hybrid=False,
+            half=False,
+            amp=False,
+            compile=False,
+            plots=False,
+            end2end=False,
+            conf=0.001,
+            iou=0.7,
+            max_det=300,
+            single_cls=False,
+            agnostic_nms=False,
+            save_json=False,
+            save_hybrid=False,
         )
 
     def label_loss_items(self, loss_items=None, prefix="val"):
         if loss_items is not None:
-            return dict(zip([f"{prefix}/{x}" for x in self.loss_names],
-                           [round(float(x), 5) for x in loss_items]))
+            return dict(zip([f"{prefix}/{x}" for x in self.loss_names], [round(float(x), 5) for x in loss_items]))
         return [f"{prefix}/{x}" for x in self.loss_names]
 
 
@@ -86,7 +94,7 @@ def main():
         DEBUG_LOG.unlink()
 
     log("=" * 70)
-    log(f"eval.py DEBUG — one2many only")
+    log("eval.py DEBUG — one2many only")
     log(f"ckpt:   {args.ckpt}")
     log(f"config: {args.quant_config}")
     log(f"device: {args.device}")
@@ -103,7 +111,9 @@ def main():
     # The validator will select one2many branch via _rebuild_pt2e_predictions.
 
     hyp = dict(DEFAULT_CFG_DICT, **float_model.args) if isinstance(float_model.args, dict) else {}
-    hyp.setdefault("box", 7.5); hyp.setdefault("cls", 0.5); hyp.setdefault("dfl", 1.5)
+    hyp.setdefault("box", 7.5)
+    hyp.setdefault("cls", 0.5)
+    hyp.setdefault("dfl", 1.5)
     float_model.args = SimpleNamespace(**hyp)
 
     # ------------------------------------------------------------------
@@ -135,6 +145,7 @@ def main():
 
     # Apply the same eval preparation the validator does
     from ultralytics.engine.validator import BaseValidator
+
     prepared = BaseValidator._prepare_pt2e_model_for_eval(prepared)
     log(f"  after _prepare_pt2e_model_for_eval: prepared.training={prepared.training}")
 
@@ -168,12 +179,15 @@ def main():
     train_mAP = "?"
     if results_csv.exists():
         import csv
+
         with results_csv.open() as f:
             reader = csv.DictReader(f)
             for i, row in enumerate(reader):
                 if i == ckpt_epoch:
                     train_mAP = float(row["metrics/mAP50-95(B)"])
-                    log(f"[ref] training internal validation epoch{ckpt_epoch}: mAP50-95 = {train_mAP:.4f} (CSV epoch{i+1})")
+                    log(
+                        f"[ref] training internal validation epoch{ckpt_epoch}: mAP50-95 = {train_mAP:.4f} (CSV epoch{i + 1})"
+                    )
                     break
     if train_mAP == "?":
         log(f"[ref] training validation result not found for epoch {ckpt_epoch}")
@@ -186,32 +200,77 @@ def main():
 
     val_bs = 64
     val_dataset = build_yolo_dataset(
-        argparse.Namespace(task="detect", data=args.data, imgsz=args.imgsz, batch=val_bs,
-                           workers=0, fraction=1.0, augment=False, erasing=0.0,
-                           flipud=0.0, fliplr=0.0, hsv_h=0.0, hsv_s=0.0, hsv_v=0.0,
-                           degrees=0.0, translate=0.0, scale=0.0, shear=0.0,
-                           perspective=0.0, mosaic=0.0, mixup=0.0, cutmix=0.0,
-                           copy_paste=0.0, auto_augment=None, single_cls=False, classes=None,
-                           overlap_mask=False, mask_ratio=4, rect=True, cache=False),
-        data_dict["val"], val_bs, data_dict, mode="val", rect=True, stride=gs,
+        argparse.Namespace(
+            task="detect",
+            data=args.data,
+            imgsz=args.imgsz,
+            batch=val_bs,
+            workers=0,
+            fraction=1.0,
+            augment=False,
+            erasing=0.0,
+            flipud=0.0,
+            fliplr=0.0,
+            hsv_h=0.0,
+            hsv_s=0.0,
+            hsv_v=0.0,
+            degrees=0.0,
+            translate=0.0,
+            scale=0.0,
+            shear=0.0,
+            perspective=0.0,
+            mosaic=0.0,
+            mixup=0.0,
+            cutmix=0.0,
+            copy_paste=0.0,
+            auto_augment=None,
+            single_cls=False,
+            classes=None,
+            overlap_mask=False,
+            mask_ratio=4,
+            rect=True,
+            cache=False,
+        ),
+        data_dict["val"],
+        val_bs,
+        data_dict,
+        mode="val",
+        rect=True,
+        stride=gs,
     )
-    val_loader = build_dataloader(val_dataset, batch=val_bs, workers=0,
-                                   shuffle=False, rank=-1, drop_last=False)
+    val_loader = build_dataloader(val_dataset, batch=val_bs, workers=0, shuffle=False, rank=-1, drop_last=False)
 
     # ------------------------------------------------------------------
     # 6. Validate
     # ------------------------------------------------------------------
     cfg = copy.deepcopy(DEFAULT_CFG_DICT)
-    cfg.update({"task": "detect", "mode": "val", "data": args.data, "imgsz": args.imgsz,
-                 "batch": val_bs, "device": args.device, "workers": 0, "split": "val",
-                 "end2end": False, "conf": 0.001, "iou": 0.7, "max_det": 300,
-                 "half": False, "plots": False, "save_json": False, "save_hybrid": False})
+    cfg.update(
+        {
+            "task": "detect",
+            "mode": "val",
+            "data": args.data,
+            "imgsz": args.imgsz,
+            "batch": val_bs,
+            "device": args.device,
+            "workers": 0,
+            "split": "val",
+            "end2end": False,
+            "conf": 0.001,
+            "iou": 0.7,
+            "max_det": 300,
+            "half": False,
+            "plots": False,
+            "save_json": False,
+            "save_hybrid": False,
+        }
+    )
 
     validator = DetectionValidator(dataloader=val_loader, args=cfg)
     fake_trainer = FakeTrainer(float_model, prepared, data_dict, device)
 
     # --- DIAGNOSTIC: hook observer values through validator chain ---
     _orig_prep = BaseValidator._prepare_pt2e_model_for_eval
+
     def _hooked_prep(model):
         scale_before = {}
         for name, buf in model.named_buffers():
@@ -227,12 +286,14 @@ def main():
                         changed += 1
         log(f"  [hook] _prepare_pt2e_model_for_eval: {changed}/{len(scale_before)} observer scales changed")
         if changed > 0:
-            log(f"  [hook] model.float() copy appears to alter observer values!")
+            log("  [hook] model.float() copy appears to alter observer values!")
         return result
+
     BaseValidator._prepare_pt2e_model_for_eval = staticmethod(_hooked_prep)
 
     log("\n[step 6] Running one2many validation ...")
     import time as _time
+
     t0 = _time.time()
     results = validator(trainer=fake_trainer)
     elapsed = _time.time() - t0

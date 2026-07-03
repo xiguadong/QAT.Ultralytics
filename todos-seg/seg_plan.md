@@ -8,51 +8,51 @@
 
 ## 已知基准
 
-| 项目 | 数值 |
-|------|:---:|
-| yolo26n-seg float box mAP | **39.6**（end2end=True） |
-| yolo26n-seg float mask mAP | **33.9**（end2end=True） |
-| 训练集 | COCO 2017, 118,287 张 |
-| 配置 | W8A8 + S8 matmul（对标检测 exp33） |
-| 训练 | 50 epoch, lr=2e-5, batch=64, 4xGPU, 无数据增强 |
+| 项目                       |                      数值                      |
+| -------------------------- | :--------------------------------------------: |
+| yolo26n-seg float box mAP  |            **39.6**（end2end=True）            |
+| yolo26n-seg float mask mAP |            **33.9**（end2end=True）            |
+| 训练集                     |             COCO 2017, 118,287 张              |
+| 配置                       |       W8A8 + S8 matmul（对标检测 exp33）       |
+| 训练                       | 50 epoch, lr=2e-5, batch=64, 4xGPU, 无数据增强 |
 
 ## 与检测模型的关键差异
 
-| | 检测 | 分割 |
-|------|:---:|:---:|
-| end2end | False (one2many+NMS) | **True** (无 NMS) |
-| 输出 | boxes + scores | boxes + scores + mask_coefficient + proto |
-| validator | DetectionValidator | SegmentValidator |
-| per-scale | concat_flag=False | 继承 Detect 默认 True |
+|           |         检测         |                   分割                    |
+| --------- | :------------------: | :---------------------------------------: |
+| end2end   | False (one2many+NMS) |             **True** (无 NMS)             |
+| 输出      |    boxes + scores    | boxes + scores + mask_coefficient + proto |
+| validator |  DetectionValidator  |             SegmentValidator              |
+| per-scale |  concat_flag=False   |           继承 Detect 默认 True           |
 
 ## 源码改动
 
-| 文件 | 改动 | 原因 |
-|------|------|------|
-| `head.py:Segment.forward_head()` | 增加 `concat_flag` 参数 | `Detect.forward()` 传入 `concat_flag=False`，分割头原签名不兼容 |
-| `loss.py:v8SegmentationLoss.loss()` | 增加 `teacher_preds`、`**kwargs` | `E2ELoss.__call__()` 统一传 `teacher_preds` 给子 loss |
+| 文件                                | 改动                             | 原因                                                            |
+| ----------------------------------- | -------------------------------- | --------------------------------------------------------------- |
+| `head.py:Segment.forward_head()`    | 增加 `concat_flag` 参数          | `Detect.forward()` 传入 `concat_flag=False`，分割头原签名不兼容 |
+| `loss.py:v8SegmentationLoss.loss()` | 增加 `teacher_preds`、`**kwargs` | `E2ELoss.__call__()` 统一传 `teacher_preds` 给子 loss           |
 
 ## 实验
 
-| 实验 | 配置 | epochs | lr0 | box best | mask best | 状态 |
-|------|------|:---:|:---:|:---:|:---:|:---:|
-| exp1 | W8A8 + S8 matmul, end2end=True | 50 | 2e-5 | **38.01** (ep31) | **32.66** (ep31) | ✅ 已完成 |
+| 实验 | 配置                           | epochs | lr0  |     box best     |    mask best     |   状态    |
+| ---- | ------------------------------ | :----: | :--: | :--------------: | :--------------: | :-------: |
+| exp1 | W8A8 + S8 matmul, end2end=True |   50   | 2e-5 | **38.01** (ep31) | **32.66** (ep31) | ✅ 已完成 |
 
 ### exp1 精度追踪
 
-| epoch | box mAP | mask mAP |
-|:---:|:---:|:---:|
-| 1 | 37.39 | 31.95 |
+|   epoch   |  box mAP  | mask mAP  |
+| :-------: | :-------: | :-------: |
+|     1     |   37.39   |   31.95   |
 | 31 (best) | **38.01** | **32.66** |
-| 40 | 37.80 | 32.43 |
-| 50 (last) | 37.77 | 32.49 |
+|    40     |   37.80   |   32.43   |
+| 50 (last) |   37.77   |   32.49   |
 
 ### vs float 损耗
 
-| 指标 | float | QAT best | 损耗 |
-|------|:---:|:---:|:---:|
-| box | 39.6 | 38.01 | -1.59 |
-| mask | 33.9 | 32.66 | -1.24 |
+| 指标 | float | QAT best | 损耗  |
+| ---- | :---: | :------: | :---: |
+| box  | 39.6  |  38.01   | -1.59 |
+| mask | 33.9  |  32.66   | -1.24 |
 
 分割损耗大于检测（检测 exp33 损耗仅 -1.0 box），分割头多出 mask_coefficient（cv4）和 proto 模块，量化敏感度更高。
 

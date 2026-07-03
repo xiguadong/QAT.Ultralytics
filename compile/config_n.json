@@ -18,16 +18,26 @@
       {
         "op_type": "MatMul",
         "data_type": "S8"
-      },  
+      },
       {
-        "layer_names": ["node_Reshape_745", "node_Split_2180", "node_Transpose_770", "node_Transpose_796", "node_Reshape_824",
-                        "node_Reshape_1612", "node_Split_2201", "node_Transpose_1635", "node_Transpose_1660", "node_Reshape_1688"],
+        "layer_names": [
+          "node_Reshape_745",
+          "node_Split_2180",
+          "node_Transpose_770",
+          "node_Transpose_796",
+          "node_Reshape_824",
+          "node_Reshape_1612",
+          "node_Split_2201",
+          "node_Transpose_1635",
+          "node_Transpose_1660",
+          "node_Reshape_1688"
+        ],
         "data_type": "S8"
-      }   
+      }
     ],
     "calibration_method": "MinMax",
     "precision_analysis": true,
-    "precision_analysis_method":"EndToEnd",
+    "precision_analysis_method": "EndToEnd",
     "precision_analysis_mode": "NPUBackend"
   },
   "input_processors": [
@@ -40,8 +50,7 @@
       "std": [1, 1, 1]
     }
   ],
-  "output_processors": [
-  ],
+  "output_processors": [],
   "compiler": {
     "npu_perf": true,
     "check": 0
