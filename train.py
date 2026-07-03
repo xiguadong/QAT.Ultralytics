@@ -1,20 +1,24 @@
 from ultralytics import YOLO
-# build from YAML and transfer weights
-model = YOLO("yolo11n.yaml")
-model.load("yolo11n.pt")
 
-results = model.train(
+model = YOLO("yolo26n.yaml")
+model.load("yolo26n.pt")
+
+model.train(
     data="coco.yaml",
     batch=64,
-    epochs=10,                  # 可适当增加轮次
+    epochs=50,
     imgsz=640,
-    qat_onnx_imgsz=[640, 640],
-    device=0,
-    project="runs/detect",      # 保存目录
-    name="qat",
+    device=2,
+    project='runs/detect/',
+    name="exp34-yolo26n-S8matmul-noEMA",
+    exist_ok=True,
+    qat=True,
+    qat_config="config_matmul_s8.json",
+    qat_validate=True,
+    qat_ema=False,
+    end2end=False,
     save_period=1,
-    qat_onnx_sp="runs/last_checkpoint.onnx", # 训练完成后，导出的onnx
-    lr0=0.00004,
-    lrf=0.2,
-    # fraction=1,  # 可设0.01, 使用1%的训练数据进行流程测试
+    fraction=1,
+    lr0=2e-5,
+    lrf=0.1,
 )

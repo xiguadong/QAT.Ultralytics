@@ -1,0 +1,4 @@
+interface:
+  display_name: "QAT 中文 Todo"
+  short_description: "中文 QAT todo 落地流程与模板，支持计划、实施和提交归档"
+  default_prompt: "使用中文并按 QAT todo 流程执行：初始化、选题、细化、实现、验证、归档。"

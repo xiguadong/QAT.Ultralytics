@@ -103,7 +103,7 @@ def get_quantization_config(
             )
             extra_args["observer"] = dynamic_quant_observer
         else:
-            extra_args["observer"] = HistogramObserver
+            extra_args["observer"] = MovingAverageMinMaxObserver
             act_observer_or_fake_quant_ctr = _LearnableFakeQuantize  # type: ignore[assignment]
     else:
         if is_dynamic:
@@ -386,7 +386,6 @@ class AXQuantizer(Quantizer):
         self.init_regional()
 
     def init_regional(self):
-        # matlul
         regional_matmul = {
             "module_names": None,
             "module_type": "matmul",
@@ -401,7 +400,6 @@ class AXQuantizer(Quantizer):
         }
         regional_matmul_config = load_regional_config(regional_matmul)
         self.regional_configs.append(regional_matmul_config)
-        # gridsample
         regional_gridsample = {
             "module_names": None,
             "module_type": "gridsample",
@@ -456,4 +454,3 @@ class AXQuantizer(Quantizer):
 
     def validate(self, model: torch.fx.GraphModule) -> None:
         pass
-

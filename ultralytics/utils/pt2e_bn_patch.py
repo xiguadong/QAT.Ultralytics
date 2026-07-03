@@ -40,10 +40,10 @@ def patch_pt2e_batchnorm_handling() -> bool:
     """
     Monkey patch PT2E exported BN train/eval switching to preserve custom eps and momentum.
 
-    Torch 2.6 `torch.ao.quantization.pt2e.export_utils._replace_batchnorm` rewrites exported
-    batchnorm nodes with hard-coded default `momentum=0.1` and `eps=1e-5`. Ultralytics models
-    initialize BN with `momentum=0.03` and `eps=1e-3`, so QAT/export validation can regress
-    significantly after calling `move_exported_model_to_eval()` or `allow_exported_model_train_eval()`.
+    Torch 2.6 `torch.ao.quantization.pt2e.export_utils._replace_batchnorm` rewrites exported batchnorm nodes with
+    hard-coded default `momentum=0.1` and `eps=1e-5`. Ultralytics models initialize BN with `momentum=0.03` and
+    `eps=1e-3`, so QAT/export validation can regress significantly after calling
+    `move_exported_model_to_eval()` or `allow_exported_model_train_eval()`.
     """
     try:
         from torch.ao.quantization.pt2e import export_utils, qat_utils
@@ -54,6 +54,7 @@ def patch_pt2e_batchnorm_handling() -> bool:
     changed = False
 
     if not getattr(export_utils, _PATCH_FLAG, False):
+
         def _replace_batchnorm_preserve_hyperparams(m: torch.fx.GraphModule, train_to_eval: bool) -> None:
             _toggle_exported_batch_norm_nodes(m, training=not train_to_eval)
 
@@ -62,6 +63,7 @@ def patch_pt2e_batchnorm_handling() -> bool:
         changed = True
 
     if not getattr(qat_utils, _QAT_PATCH_FLAG, False):
+
         def _is_conv_transpose_fn(conv_fn) -> bool:
             return conv_fn in {F.conv_transpose1d, F.conv_transpose2d}
 

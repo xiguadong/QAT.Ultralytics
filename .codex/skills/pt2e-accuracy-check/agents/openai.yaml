@@ -1,0 +1,4 @@
+interface:
+  display_name: "PT2E 精度查验"
+  short_description: "遇到 export_for_training 或 prepare_qat_pt2e 时，默认检查 BN 漂移和数值对齐"
+  default_prompt: "执行 PT2E 精度查验：定位 exported/prepared/QAT 哪一阶段引入误差，先记录模型原始 BN 超参数，再检查 BN eps/momentum 是否漂移，并做数值对齐。"
