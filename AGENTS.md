@@ -1,6 +1,6 @@
 # 仓库协作说明
 
-- Python 环境应当使用：`/home/heqi/miniforge3/envs/torch2.6-qat-yolo`。
+- Python 环境应当使用：`miniforge3/envs/torch2.6-qat-yolo`。
 - 当前仓库用于调试 QAT（量化感知训练）模型。
 - 所有回复统一使用中文。
 - 优先解决qat训练bug，跑通yolo26检测模型和分割模型的qat训练

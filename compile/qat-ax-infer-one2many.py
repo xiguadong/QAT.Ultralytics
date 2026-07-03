@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
+import axengine as ort
 import torch
 import tqdm
 
@@ -71,19 +71,6 @@ class LetterBox:
         )
 
 
-def ensure_hwc(output: np.ndarray, channels: int) -> np.ndarray:
-    arr = np.asarray(output)
-    if arr.ndim == 4 and arr.shape[0] == 1:
-        arr = arr[0]
-    if arr.ndim != 3:
-        raise ValueError(f"Unexpected output rank: {output.shape}")
-    if arr.shape[-1] == channels:
-        return arr
-    if arr.shape[0] == channels:
-        return np.transpose(arr, (1, 2, 0))
-    raise ValueError(f"Unexpected output layout: {output.shape}, expected channel size {channels}")
-
-
 def sigmoid(x: np.ndarray) -> np.ndarray:
     x = np.clip(x, -80.0, 80.0)
     return 1.0 / (1.0 + np.exp(-x))
@@ -121,134 +108,86 @@ def batched_nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray, io
     if len(boxes) == 0:
         return np.array([], dtype=np.int64)
 
-    keep = []
+    keep: list[int] = []
     for cls_id in np.unique(class_ids):
         idxs = np.where(class_ids == cls_id)[0]
-        cls_boxes = boxes[idxs]
+        n = len(idxs)
+        if n == 0:
+            continue
+        if n == 1:
+            keep.append(idxs[0])
+            continue
+
         cls_scores = scores[idxs]
-
         order = np.argsort(-cls_scores)
-        cls_boxes = cls_boxes[order]
-        n = len(order)
-        suppressed = np.zeros(n, dtype=bool)
+        idxs = idxs[order]
 
-        for i in range(n):
-            if suppressed[i]:
-                continue
-            keep.append(idxs[order[i]])
+        cls_boxes = boxes[idxs].astype(np.float64)
+        x1 = cls_boxes[:, 0]; y1 = cls_boxes[:, 1]
+        x2 = cls_boxes[:, 2]; y2 = cls_boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
 
-            x1_i, y1_i, x2_i, y2_i = cls_boxes[i]
-            area_i = (x2_i - x1_i) * (y2_i - y1_i)
+        remaining = np.arange(n, dtype=np.int64)
+        while len(remaining) > 0:
+            i = remaining[0]
+            keep.append(idxs[i])
+            if len(remaining) == 1:
+                break
 
-            for j in range(i + 1, n):
-                if suppressed[j]:
-                    continue
-                x1_j, y1_j, x2_j, y2_j = cls_boxes[j]
-                inter_x1 = max(x1_i, x1_j)
-                inter_y1 = max(y1_i, y1_j)
-                inter_x2 = min(x2_i, x2_j)
-                inter_y2 = min(y2_i, y2_j)
-                if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-                    continue
-                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-                area_j = (x2_j - x1_j) * (y2_j - y1_j)
-                iou = inter_area / (area_i + area_j - inter_area + 1e-16)
-                if iou > iou_thres:
-                    suppressed[j] = True
+            rest = remaining[1:]
+            xx1 = np.maximum(x1[i], x1[rest])
+            yy1 = np.maximum(y1[i], y1[rest])
+            xx2 = np.minimum(x2[i], x2[rest])
+            yy2 = np.minimum(y2[i], y2[rest])
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            ious = inter / (areas[i] + areas[rest] - inter + 1e-16)
+            remaining = rest[ious <= iou_thres]
 
     if not keep:
         return np.array([], dtype=np.int64)
 
-    keep = np.array(keep)
+    keep = np.array(keep, dtype=np.int64)
     order = np.argsort(-scores[keep])
     return keep[order][:max_det]
 
 
-def pair_outputs(outputs: list[np.ndarray], num_classes: int) -> list[tuple[int, np.ndarray, np.ndarray]]:
-    groups: dict[tuple[int, int], dict[str, np.ndarray]] = {}
-    for output in outputs:
-        squeezed = output[0] if output.ndim == 4 and output.shape[0] == 1 else output
-        if squeezed.ndim != 3:
-            raise ValueError(f"Unsupported output shape: {output.shape}")
+def decode_yolo26_perscale(outputs: list[np.ndarray], imgsz: int = 640, num_classes: int = 80) -> torch.Tensor:
+    strides = [8, 16, 32]
+    expected_n = {(imgsz // s) ** 2 for s in strides}
 
-        shape = squeezed.shape
-        if shape[-1] in (4, num_classes):
-            spatial = (shape[0], shape[1])
-            channels = shape[-1]
-        elif shape[0] in (4, num_classes):
-            spatial = (shape[1], shape[2])
-            channels = shape[0]
-        else:
-            raise ValueError(f"Cannot classify output tensor shape: {output.shape}")
-
-        group = groups.setdefault(spatial, {})
-        if channels == 4:
-            group["box"] = ensure_hwc(output, 4)
-        else:
-            group["cls"] = ensure_hwc(output, num_classes)
-
-    pairs = []
-    for (feat_h, _), group in sorted(groups.items(), reverse=True):
-        if "box" not in group or "cls" not in group:
-            raise ValueError("Incomplete output pair.")
-        stride = 640 // feat_h
-        pairs.append((stride, group["box"], group["cls"]))
-    return pairs
-
-
-def decode_predictions(outputs: list[np.ndarray], num_classes: int = 80) -> torch.Tensor:
-    if len(outputs) == 1 and outputs[0].shape == (1, 84, 8400):
-        pred = torch.from_numpy(outputs[0].astype(np.float32))[0]
-        pred = pred.T
-        boxes_xywh = pred[:, :4].clone()
-        wh_half = boxes_xywh[:, 2:4] / 2
-        xy = boxes_xywh[:, :2]
-        pred[:, :4] = torch.cat([xy - wh_half, xy + wh_half], dim=1)
-        return pred.unsqueeze(0)
-
-    perscale_configs: dict[int, dict[str, np.ndarray]] = {}
+    scale_configs: dict[int, dict[str, np.ndarray]] = {}
     for t in outputs:
         s = t.shape
-        if s[0] == 1 and s[2] in {6400, 1600, 400} and s[1] in (4, num_classes):
+        if s[0] == 1 and s[2] in expected_n:
             n = s[2]
-            entry = perscale_configs.setdefault(n, {})
+            entry = scale_configs.setdefault(n, {})
             if s[1] == 4:
                 entry["box"] = t
             elif s[1] == num_classes:
                 entry["cls"] = t
 
-    if len(perscale_configs) == 3:
-        strides_map = {6400: 8, 1600: 16, 400: 32}
-        feat_map = {6400: 80, 1600: 40, 400: 20}
-        preds = []
-        for n in sorted(perscale_configs, reverse=True):
-            box = perscale_configs[n]["box"]
-            cl = perscale_configs[n]["cls"]
-            stride = strides_map[n]
-            fs = feat_map[n]
-            dist = box[0].T
-            cl = cl[0].T
-            gy, gx = np.meshgrid(np.arange(fs, dtype=np.float32), np.arange(fs, dtype=np.float32), indexing="ij")
-            anchor_points = np.stack((gx + 0.5, gy + 0.5), axis=-1).reshape(-1, 2)
-            x1y1 = (anchor_points - dist[:, :2]) * stride
-            x2y2 = (anchor_points + dist[:, 2:]) * stride
-            xyxy = np.concatenate((x1y1, x2y2), axis=1)
-            cl = sigmoid(cl)
-            preds.append(np.concatenate((xyxy, cl), axis=1))
-        return torch.from_numpy(np.concatenate(preds, axis=0).astype(np.float32))[None, ...]
+    if not scale_configs:
+        raise ValueError("No per-scale box/cls outputs found")
 
-    pairs = pair_outputs(outputs, num_classes)
     preds = []
-    for stride, feat_box, feat_cls in pairs:
-        feat_h, feat_w, _ = feat_box.shape
-        gy, gx = np.meshgrid(np.arange(feat_h, dtype=np.float32), np.arange(feat_w, dtype=np.float32), indexing="ij")
+    for n in sorted(scale_configs, reverse=True):
+        box = scale_configs[n]["box"]
+        cl = scale_configs[n]["cls"]
+        fs = int(np.sqrt(n))
+        stride = imgsz // fs
+
+        dist = box[0].T
+        cl = cl[0].T
+        gy, gx = np.meshgrid(np.arange(fs, dtype=np.float32), np.arange(fs, dtype=np.float32), indexing="ij")
         anchor_points = np.stack((gx + 0.5, gy + 0.5), axis=-1).reshape(-1, 2)
-        dist = feat_box.reshape(-1, 4)
         x1y1 = (anchor_points - dist[:, :2]) * stride
         x2y2 = (anchor_points + dist[:, 2:]) * stride
         xyxy = np.concatenate((x1y1, x2y2), axis=1)
-        cl = sigmoid(feat_cls.reshape(-1, num_classes))
+        cl = sigmoid(cl)
         preds.append(np.concatenate((xyxy, cl), axis=1))
+
     return torch.from_numpy(np.concatenate(preds, axis=0).astype(np.float32))[None, ...]
 
 
@@ -260,8 +199,8 @@ class YOLO26ONNXPredictor:
         self.max_det = max_det
         self.max_nms = max_nms
         self.cls_map = coco80_to_coco91_class()
-        providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
-        self.session = ort.InferenceSession(model_path, providers=providers or ["CPUExecutionProvider"])
+   
+        self.session = ort.InferenceSession(model_path, providers=["AxEngineExecutionProvider"])
         input_meta = self.session.get_inputs()[0]
         self.input_name = input_meta.name
         _, _, self.input_h, self.input_w = input_meta.shape
@@ -284,9 +223,15 @@ class YOLO26ONNXPredictor:
         return img[None, ...], meta
 
     def postprocess(self, outputs: list[np.ndarray], meta: dict) -> None:
-        pred = decode_predictions(outputs, num_classes=80)[0]
+        pred = decode_yolo26_perscale(outputs, imgsz=self.input_h, num_classes=80)[0]
         boxes = pred[:, :4]
         scores = pred[:, 4:]
+
+        keep_mask = scores.amax(dim=1) > self.conf_thres
+        if keep_mask.sum() == 0:
+            return
+        boxes = boxes[keep_mask]
+        scores = scores[keep_mask]
 
         box_indices, cls_ids = torch.where(scores > self.conf_thres)
         if box_indices.numel() == 0:
@@ -336,23 +281,23 @@ class YOLO26ONNXPredictor:
 
 def parse_args():
     root = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description="Standalone ONNX evaluator for YOLO26 one2many models (with NMS).")
+    parser = argparse.ArgumentParser(description="Standalone evaluator for QAT yolo26 model (qat_exp24_one2many_slim.onnx).")
     parser.add_argument(
         "--model",
         type=str,
-        default=str(root / "onnx/yolo26n-backbone.onnx"),
+        default=str(root / "output_26n-one2many-qat/compiled.axmodel"),
         help="Input ONNX model.",
     )
     parser.add_argument(
         "--img-dir",
         type=str,
-        default="/data/pengyancao/data/coco/val2017",
+        default="/root/coco2017",
         help="COCO val2017 image directory.",
     )
     parser.add_argument(
         "--output-json",
         type=str,
-        default=str(root / "output/onnx_preds-yolo26n-one2many.json"),
+        default=str(root / "output" / "ax_preds-qat-one2many.json"),
         help="Output COCO prediction json.",
     )
     parser.add_argument("--conf-thres", type=float, default=0.001, help="Confidence threshold.")
@@ -382,11 +327,11 @@ def main():
 
     for image_path in tqdm.tqdm(images, desc="infer"):
         predictor.run_image(str(image_path))
-        print(image_path)
-        break
-    for i in predictor.predictions[:]:
-        print(i)
-    exit(0)
+    #     print(image_path)
+    #     break
+    # for i in predictor.predictions[:5]:
+    #     print(i)
+
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
