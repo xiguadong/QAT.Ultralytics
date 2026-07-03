@@ -9,7 +9,7 @@ model.train(
     epochs=50,
     imgsz=640,
     device=2,
-    project='runs/detect/',
+    project="runs/detect/",
     name="qat",
     exist_ok=True,
     qat=True,

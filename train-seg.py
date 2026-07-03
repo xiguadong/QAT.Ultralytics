@@ -9,7 +9,7 @@ model.train(
     epochs=50,
     imgsz=640,
     device=2,
-    project='runs/segment/',
+    project="runs/segment/",
     name="exp1-yolo26n-seg-S8matmul-end2endTrue",
     exist_ok=True,
     qat=True,

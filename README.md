@@ -20,7 +20,8 @@
 注：`qat` 模型慢于 `ptq` 模型是因为 `qat` 中 `concat` 算子未共享量化参数，每一个输入输出都有量化参数，导致计算量和 `ddr swap` 高于 `qat` 模型。
 
 测试方法：
-``` bash
+
+```bash
 ax_run_model -w 10 -r 100 -m xx.axmodel
 ```
 
@@ -39,10 +40,10 @@ pip install -e .
 
 ```bash
 # 单卡
-python train.py 
+python train.py
 
 # 本仓库含自定义的qat参数，如果上述指令报错，可能使用了其他环境Ultralytics仓库，使用如下指令尝试
-PYTHONPATH=/your/project/path/QAT.Ultralytics:$PYTHONPATH python train.py 
+PYTHONPATH=/your/project/path/QAT.Ultralytics:$PYTHONPATH python train.py
 ```
 
 3. 训练后评估 QAT 权重：
@@ -64,6 +65,7 @@ python test.py
 ```
 
 ## 模型部署
+
 请阅读 [qat_deployment.md](./compile/qat_deployment.md)。
 
 ## todos
