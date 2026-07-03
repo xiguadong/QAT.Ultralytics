@@ -30,17 +30,17 @@ DEFAULT_EXPORTS = {
         task="detect",
         model="yolo26n.yaml",
         pretrained="yolo26n.pt",
-        qat_weights="runs/detect/exp32-yolo26n-S16matmul-e2eFalse/weights/best.pt",
-        out="./yolo26_onnx/qat_exp32_one2many.onnx",
-        qat_state_out="./yolo26_onnx/qat_exp32_one2many.pth",
+        qat_weights="runs/detect/qat/weights/best.pt",
+        out="./runs/qat_one2many.onnx",
+        qat_state_out="./runs/qat_one2many.pth",
     ),
     "segment": ExportDefaults(
         task="segment",
         model="yolo26n-seg.yaml",
         pretrained="./weights/yolo26n-seg.pt",
-        qat_weights="runs/segment/qat2/weights/best.pt",
-        out="./qat-seg.onnx",
-        qat_state_out="./qat-seg.pth",
+        qat_weights="runs/segment/qat/weights/best.pt",
+        out="./runs/qat-seg.onnx",
+        qat_state_out="./runs/qat-seg.pth",
     ),
 }
 
@@ -55,14 +55,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--qat-weights",
         dest="qat_weights",
-        default="runs/detect/exp32-yolo26n-S16matmul-e2eFalse/weights/best.pt",
+        default="runs/detect/qat/weights/best.pt",
         help="QAT checkpoint path.",
     )
-    parser.add_argument("--out", default="./yolo26_onnx/qat_exp32_one2many.onnx", help="ONNX output path.")
+    parser.add_argument("--out", default="./runs/qat_one2many.onnx", help="ONNX output path.")
     parser.add_argument(
         "--qat-state-out",
         dest="qat_state_out",
-        default="./yolo26_onnx/qat_exp32_one2many.pth",
+        default="./runs/qat_one2many.pth",
         help="Saved QAT state dict path.",
     )
     parser.add_argument("--quant-config", dest="quant_config", default="./config.json", help="Quant config path.")
