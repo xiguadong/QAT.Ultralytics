@@ -9,16 +9,16 @@
 
 以下为当前 AXERA NPU 实测结果：
 
-| 模型 | `end2end` | 配置 | FP32 mAP50-95 | FP32 mAP50 | QAT mAP50-95 | QAT mAP50 | Err mAP:50~95 | Err mAP:50 | Speed(ms) |
-|---|---|---|---|---|---|---|---|---|---|
-| YOLO26n | `true` | ptq(w8a8_siluInU16) | 40.24 | 55.79 | 37.83 | 53.54 | -2.41 | -2.25 | 3.613 |
-| YOLO26n | `true` | `config_siluInU16_attnS8_clsU16.json` | 40.24 | 55.79 | 39.61 | 55.63 | -0.63 | -0.16 | 3.761 |
-| YOLO26n | `true` | `config_siluInU8_attnS8_clsU16.json` | 40.24 | 55.79 | 39.39 | 55.37 | -0.85 | -0.42 | 3.656 |
-| YOLO26n | `false` | ptq(w8a8_siluInU16) | 40.87 | 56.87 | 39.52 | 55.78 | -1.35  | -1.09 | 3.616 |
-| YOLO26n | `false` | `config_siluInU8_attnS8_clsU16_one2many.json` | 40.87 | 56.87 | 39.97 | 56.57 | -0.9 | -0.3 | 3.647 |
-| YOLO11n | `None` | ptq(w8a8_siluInU16) | 39.4 | 55.3 | 38.8 | 54.55 | -0.6 | -0.75 | 3.934 |
-| YOLO11n | `None` | `config_yolo11n_siluInU8_attnS8.json` | 39.4 | 55.3 | 38.45 | 54.46 | -0.95 | -0.84 | 3.814 |
-| YOLO11n | `None` | `config_yolo11n_siluInU16_attnS8.json` | 39.4 | 55.3 | 38.84 | 54.86 | -0.56 | -0.44 | 3.953 |
+| 模型    | `end2end` | 配置                                          | FP32 mAP50-95 | FP32 mAP50 | QAT mAP50-95 | QAT mAP50 | Err mAP:50~95 | Err mAP:50 | Speed(ms) |
+| ------- | --------- | --------------------------------------------- | ------------- | ---------- | ------------ | --------- | ------------- | ---------- | --------- |
+| YOLO26n | `true`    | ptq(w8a8_siluInU16)                           | 40.24         | 55.79      | 37.83        | 53.54     | -2.41         | -2.25      | 3.613     |
+| YOLO26n | `true`    | `config_siluInU16_attnS8_clsU16.json`         | 40.24         | 55.79      | 39.61        | 55.63     | -0.63         | -0.16      | 3.761     |
+| YOLO26n | `true`    | `config_siluInU8_attnS8_clsU16.json`          | 40.24         | 55.79      | 39.39        | 55.37     | -0.85         | -0.42      | 3.656     |
+| YOLO26n | `false`   | ptq(w8a8_siluInU16)                           | 40.87         | 56.87      | 39.52        | 55.78     | -1.35         | -1.09      | 3.616     |
+| YOLO26n | `false`   | `config_siluInU8_attnS8_clsU16_one2many.json` | 40.87         | 56.87      | 39.97        | 56.57     | -0.9          | -0.3       | 3.647     |
+| YOLO11n | `None`    | ptq(w8a8_siluInU16)                           | 39.4          | 55.3       | 38.8         | 54.55     | -0.6          | -0.75      | 3.934     |
+| YOLO11n | `None`    | `config_yolo11n_siluInU8_attnS8.json`         | 39.4          | 55.3       | 38.45        | 54.46     | -0.95         | -0.84      | 3.814     |
+| YOLO11n | `None`    | `config_yolo11n_siluInU16_attnS8.json`        | 39.4          | 55.3       | 38.84        | 54.86     | -0.56         | -0.44      | 3.953     |
 
 性能：AX650N NPU1 模式，采用 `ax_run_model -w 10 -r 100 -m <model>.axmodel` 测得。
 
@@ -28,10 +28,10 @@
 
 以下为 COCO-Seg 验证集上的 QAT 训练内最优结果。`seg_best` 已完成 QuantONNX 导出与 ORT 推理。
 
-| 模型 | `end2end` | 配置 | FP32 Box mAP50-95 | QAT Box mAP50-95 | Box 误差 | FP32 Mask mAP50-95 | QAT Mask mAP50-95 | Mask 误差 | epoch |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| YOLO26n-seg | `true` | `config_yolo26nSeg_siluInU16_attnS8.json` | 39.75 | 38.86 | -0.90 | 33.86 | 33.20 | -0.66 | 44（Box 峰值） |
-| YOLO26n-seg | `true` | `config_yolo26nSeg_siluInU16_attnS8.json` | 39.75 | 38.83 | -0.92 | 33.86 | 33.32 | -0.54 | 15（Mask 峰值） |
+| 模型        | `end2end` | 配置                                      | FP32 Box mAP50-95 | QAT Box mAP50-95 | Box 误差 | FP32 Mask mAP50-95 | QAT Mask mAP50-95 | Mask 误差 |           epoch |
+| ----------- | --------- | ----------------------------------------- | ----------------: | ---------------: | -------: | -----------------: | ----------------: | --------: | --------------: |
+| YOLO26n-seg | `true`    | `config_yolo26nSeg_siluInU16_attnS8.json` |             39.75 |            38.86 |    -0.90 |              33.86 |             33.20 |     -0.66 |  44（Box 峰值） |
+| YOLO26n-seg | `true`    | `config_yolo26nSeg_siluInU16_attnS8.json` |             39.75 |            38.83 |    -0.92 |              33.86 |             33.32 |     -0.54 | 15（Mask 峰值） |
 
 注：分割模型未上板测试，该指标为训练指标。
 
@@ -218,4 +218,5 @@ env PYTHONPATH="$PWD" \
 ```
 
 ## 模型部署
+
 请阅读 [qat_deployment.md](./axera-npu/qat_deployment.md)。

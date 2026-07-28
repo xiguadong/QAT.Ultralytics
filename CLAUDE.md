@@ -13,21 +13,21 @@
 
 ## 精度目标
 
-| 模型 | 模式 | 浮点基线 | QAT 目标 |
-|---|---|---:|---:|
-| YOLO26n | `end2end=True` | 40.2 | >= 39.2 |
-| YOLO26s | `end2end=True` | 47.8 | >= 47.3 |
-| YOLO26n | `end2end=False` | 40.9 | >= 39.9 |
-| YOLO26s | `end2end=False` | 48.6 | >= 48.0 |
+| 模型    | 模式            | 浮点基线 | QAT 目标 |
+| ------- | --------------- | -------: | -------: |
+| YOLO26n | `end2end=True`  |     40.2 |  >= 39.2 |
+| YOLO26s | `end2end=True`  |     47.8 |  >= 47.3 |
+| YOLO26n | `end2end=False` |     40.9 |  >= 39.9 |
+| YOLO26s | `end2end=False` |     48.6 |  >= 48.0 |
 
 ## 交付 Profile
 
 最终 YOLO26n 检测模型只使用以下配置：
 
-| Profile | 配置 | 量化边界 |
-|---|---|---|
-| `accuracy` | `config-qat/config_siluInU16_attnS8_clsU16.json` | 全局 SiLU input U16，Attention S8，分类塔局部 U16 |
-| `throughput` | `config-qat/config_siluInU8_attnS8_clsU16.json` | 全局 SiLU input/output U8，保留 Attention S8 和分类塔局部 U16 |
+| Profile      | 配置                                             | 量化边界                                                      |
+| ------------ | ------------------------------------------------ | ------------------------------------------------------------- |
+| `accuracy`   | `config-qat/config_siluInU16_attnS8_clsU16.json` | 全局 SiLU input U16，Attention S8，分类塔局部 U16             |
+| `throughput` | `config-qat/config_siluInU8_attnS8_clsU16.json`  | 全局 SiLU input/output U8，保留 Attention S8 和分类塔局部 U16 |
 
 不要恢复 exp57 之前的一次性训练脚本和候选量化配置。profile 或图结构变化后，应从浮点预训练权重重新训练，不能跨 profile 续训。
 图结构、PyTorch 版本或导出环境变化后，先使用 `$yolo-qat-config-discovery` 按模块来源和拓扑重新生成 regional 节点配置。

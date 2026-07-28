@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import os
 from pathlib import Path
@@ -5,7 +7,6 @@ from pathlib import Path
 os.environ.setdefault("ULTRALYTICS_SKIP_DATASET_HASH", "1")
 
 from ultralytics import YOLO
-
 
 ROOT = Path(__file__).resolve().parent
 PROFILES = {
@@ -21,7 +22,9 @@ PROFILES = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a YOLO PT2E QAT model with a delivery profile or custom config.")
+    parser = argparse.ArgumentParser(
+        description="Train a YOLO PT2E QAT model with a delivery profile or custom config."
+    )
     parser.add_argument("--profile", choices=sorted(PROFILES), default=None, help="Optional YOLO26 delivery shortcut.")
     parser.add_argument("--quant-config", metavar="PATH", help="QAT JSON config. Takes precedence over --profile.")
     parser.add_argument("--task", choices=("detect", "segment"), default="detect")

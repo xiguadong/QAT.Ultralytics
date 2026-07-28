@@ -26,12 +26,12 @@ AXERA 转换配置必须与训练量化配置同名、不同目录。例如训�
 
 当前已核对的对应关系：
 
-| 模型 | 训练量化配置 | AXERA 转换配置 | Attention 数量 |
-|---|---|---|---:|
-| YOLO26n one-to-one、全局 SiLU U8 + Attention S8 + clsU16 | `config-qat/config_siluInU8_attnS8_clsU16.json` | `axera-npu/config_siluInU8_attnS8_clsU16.json` | 2 |
-| YOLO26n one-to-many、全局 SiLU U8 + Attention S8 + clsU16 | `config-qat/config_siluInU8_attnS8_clsU16_one2many.json` | `axera-npu/config_siluInU8_attnS8_clsU16_one2many.json` | 2 |
-| YOLO11n、全局 SiLU U8 + Attention S8 | `config-qat/config_yolo11n_siluInU8_attnS8.json` | `axera-npu/config_yolo11n_qat.json` | 1 |
-| YOLO11n、SiLU input U16 + Attention S8 | `config-qat/config_yolo11n_siluInU16_attnS8.json` | `axera-npu/config_yolo11n_siluInU16_attnS8.json` | 1 |
+| 模型                                                      | 训练量化配置                                             | AXERA 转换配置                                          | Attention 数量 |
+| --------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------- | -------------: |
+| YOLO26n one-to-one、全局 SiLU U8 + Attention S8 + clsU16  | `config-qat/config_siluInU8_attnS8_clsU16.json`          | `axera-npu/config_siluInU8_attnS8_clsU16.json`          |              2 |
+| YOLO26n one-to-many、全局 SiLU U8 + Attention S8 + clsU16 | `config-qat/config_siluInU8_attnS8_clsU16_one2many.json` | `axera-npu/config_siluInU8_attnS8_clsU16_one2many.json` |              2 |
+| YOLO11n、全局 SiLU U8 + Attention S8                      | `config-qat/config_yolo11n_siluInU8_attnS8.json`         | `axera-npu/config_yolo11n_qat.json`                     |              1 |
+| YOLO11n、SiLU input U16 + Attention S8                    | `config-qat/config_yolo11n_siluInU16_attnS8.json`        | `axera-npu/config_yolo11n_siluInU16_attnS8.json`        |              1 |
 
 使用 `$axera-quantonnx-config` 从该 ONNX 自动生成或复核配置，再只修改输出目录和工具链要求的输入/输出字段。
 QuantONNX 已携带 Q/DQ 参数，不需要校准集；配置中的 `/path/to/dataset` 仅为 Pulsar2 必填字段的占位值：
