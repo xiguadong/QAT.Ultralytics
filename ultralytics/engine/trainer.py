@@ -276,12 +276,16 @@ class BaseTrainer:
             self.data["train"], batch_size=batch_size, rank=LOCAL_RANK, mode="train"
         )
         # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
-        self.test_loader = self.get_dataloader(
-            self.data.get("val") or self.data.get("test"),
-            batch_size=batch_size if (self.args.task == "obb" or self.qat_model is not None) else batch_size * 2,
-            rank=LOCAL_RANK,
-            mode="val",
-        )
+        qat_ddp_rank0_val = self.qat_model is not None and self.world_size > 1
+        if not qat_ddp_rank0_val or RANK in {-1, 0}:
+            self.test_loader = self.get_dataloader(
+                self.data.get("val") or self.data.get("test"),
+                batch_size=batch_size if (self.args.task == "obb" or self.qat_model is not None) else batch_size * 2,
+                rank=-1 if qat_ddp_rank0_val else LOCAL_RANK,
+                mode="val",
+            )
+        else:
+            self.test_loader = None
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
@@ -340,7 +344,14 @@ class BaseTrainer:
             torch.amp.GradScaler("cuda", enabled=self.amp) if TORCH_2_4 else torch.cuda.amp.GradScaler(enabled=self.amp)
         )
         if self.world_size > 1:
-            self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
+            if self.qat_model is not None:
+                self.qat_model = nn.parallel.DistributedDataParallel(
+                    self.qat_model, device_ids=[RANK], find_unused_parameters=True
+                )
+            else:
+                self.model = nn.parallel.DistributedDataParallel(
+                    self.model, device_ids=[RANK], find_unused_parameters=True
+                )
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
@@ -658,7 +669,7 @@ class BaseTrainer:
                 "epoch": self.epoch,
                 "best_fitness": self.best_fitness,
                 "model": None,  # resume and final checkpoints derive from EMA
-                "qat_model": self.qat_model.state_dict() if self.qat_model is not None else None,
+                "qat_model": unwrap_model(self.qat_model).state_dict() if self.qat_model is not None else None,
                 "qat_ema": self.qat_ema.ema.state_dict() if self.qat_ema is not None else None,
                 "qat_ema_updates": self.qat_ema.updates if self.qat_ema is not None else None,
                 "ema": deepcopy(unwrap_model(self.ema.ema)).half() if self.ema is not None else None,
@@ -759,7 +770,6 @@ class BaseTrainer:
             self.ema.update(self.model)
         if self.qat_model is not None and self.qat_ema is None and getattr(self.args, "qat_ema", True):
             from ultralytics.utils.torch_utils import ModelEMA
-
             self.qat_ema = ModelEMA(self.qat_model, decay=0.9999, tau=2000)
         if self.qat_ema is not None:
             self.qat_ema.update(self.qat_model)
@@ -786,7 +796,20 @@ class BaseTrainer:
             # Sync EMA buffers from rank 0 to all ranks
             for buffer in self.ema.ema.buffers():
                 dist.broadcast(buffer, src=0)
-        metrics = self.validator(self)
+        if self.qat_model is not None and self.world_size > 1:
+            metrics = None
+            if RANK == 0:
+                world_size = self.world_size
+                self.world_size = 1
+                try:
+                    metrics = self.validator(self)
+                finally:
+                    self.world_size = world_size
+            broadcast_list = [metrics]
+            dist.broadcast_object_list(broadcast_list, 0)
+            metrics = broadcast_list[0]
+        else:
+            metrics = self.validator(self)
         if self.qat_ema is not None:
             self.qat_model = _qat_model_tmp
         if metrics is None:

@@ -221,6 +221,8 @@ class DetectionValidator(BaseValidator):
 
     def gather_stats(self) -> None:
         """Gather stats from all GPUs."""
+        if not self.distributed_validation:
+            return
         if RANK == 0:
             gathered_stats = [None] * dist.get_world_size()
             dist.gather_object(self.metrics.stats, gathered_stats, dst=0)

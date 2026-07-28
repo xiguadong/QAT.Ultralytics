@@ -6,11 +6,12 @@ from pathlib import Path
 import onnx
 import torch
 from onnxslim import slim
-from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_qat_pt2e
-from torch.export import Dim
+from torch.ao.quantization.quantize_pt2e import convert_pt2e
 
 from ultralytics import YOLO
-from ultralytics.utils.ax_quantizer import AXQuantizer, ax_load_config
+from ultralytics.utils.qat_utils import prepare_pt2e_qat_model, resolve_qat_config_path
+import ultralytics.utils.quantized_decomposed_dequantize_per_channel
+
 
 warnings.filterwarnings("ignore", message=r"erase_node\(batch_norm_.*")
 
@@ -30,21 +31,28 @@ DEFAULT_EXPORTS = {
         task="detect",
         model="yolo26n.yaml",
         pretrained="yolo26n.pt",
-        qat_weights="runs/detect/qat/weights/best.pt",
-        out="./runs/qat_one2many.onnx",
-        qat_state_out="./runs/qat_one2many.pth",
+        qat_weights="runs/detect/exp32-yolo26n-S16matmul-e2eFalse/weights/best.pt",
+        out="./yolo26_onnx/qat_exp32_one2many.onnx",
+        qat_state_out="./yolo26_onnx/qat_exp32_one2many.pth",
     ),
     "segment": ExportDefaults(
         task="segment",
         model="yolo26n-seg.yaml",
         pretrained="./weights/yolo26n-seg.pt",
-        qat_weights="runs/segment/qat/weights/best.pt",
-        out="./runs/qat-seg.onnx",
-        qat_state_out="./runs/qat-seg.pth",
+        qat_weights="runs/segment/qat2/weights/best.pt",
+        out="./qat-seg.onnx",
+        qat_state_out="./qat-seg.pth",
     ),
 }
 
 REQUIRED_ONNX_OPSET = 21  # int16 Q/DQ 需要更高 opset，ORT 在 opset 18 下会拒绝加载
+
+
+def parse_bool(value: str | bool) -> bool:
+    """Parse a command-line boolean value."""
+    if isinstance(value, bool):
+        return value
+    return value.lower() in {"true", "1", "yes"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,20 +60,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", choices=sorted(DEFAULT_EXPORTS), default="detect")
     parser.add_argument("--model", default=None, help="Model yaml path.")
     parser.add_argument("--pretrained", default="yolo26n.pt", help="Float pretrained weights path.")
+    parser.add_argument("--qat-weights", dest="qat_weights",
+                        default="runs/detect/exp58-globalSiluU8AttnS8-e2eTrue-noEMA/weights/best.pt",
+                        help="QAT checkpoint path.")
+    parser.add_argument("--out", default="./yolo26_onnx/exp58_one2one.onnx", help="ONNX output path.")
+    parser.add_argument("--qat-state-out", dest="qat_state_out",
+                        default="./yolo26_onnx/qat_exp32_one2many.pth",
+                        help="Saved QAT state dict path.")
     parser.add_argument(
-        "--qat-weights",
-        dest="qat_weights",
-        default="runs/detect/qat/weights/best.pt",
-        help="QAT checkpoint path.",
+        "--export-pth",
+        dest="export_pth",
+        nargs="?",
+        const=True,
+        default=False,
+        type=parse_bool,
+        help="Export the loaded QAT state dict to --qat-state-out (default: false).",
     )
-    parser.add_argument("--out", default="./runs/qat_one2many.onnx", help="ONNX output path.")
     parser.add_argument(
-        "--qat-state-out",
-        dest="qat_state_out",
-        default="./runs/qat_one2many.pth",
-        help="Saved QAT state dict path.",
+        "--quant-config",
+        dest="quant_config",
+        default="config-qat/config_siluInU8_attnS8_clsU16.json",
+        help="Quant config path.",
     )
-    parser.add_argument("--quant-config", dest="quant_config", default="./config.json", help="Quant config path.")
     parser.add_argument("--device", default="cuda", help="Export device.")
     parser.add_argument(
         "--imgsz",
@@ -77,9 +93,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--end2end",
         dest="end2end",
-        default=False,
-        type=lambda x: x.lower() == "true",
+        default=True,
+        type=parse_bool,
         help="Export one2one branch (True) or one2many branch (False) for NMS.",
+    )
+    parser.add_argument(
+        "--fix-split-reshape-quant",
+        dest="fix_split_reshape_quant",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_bool,
+        help="Align covered Reshape Q/DQ ranges to Split input quantization for AXERA NPU (default: true).",
     )
     return parser.parse_args()
 
@@ -96,14 +121,14 @@ class DetectOne2OneWrapper(torch.nn.Module):
         o2o = preds.get("one2one", preds)
         if isinstance(o2o, list):
             return (
-                o2o[0]["boxes"],
-                o2o[0]["scores"],
-                o2o[1]["boxes"],
-                o2o[1]["scores"],
-                o2o[2]["boxes"],
-                o2o[2]["scores"],
+                o2o[0]["boxes"], o2o[0]["scores"],
+                o2o[1]["boxes"], o2o[1]["scores"],
+                o2o[2]["boxes"], o2o[2]["scores"],
             )
-        return o2o["boxes"], o2o["scores"]
+        boxes, scores = o2o["boxes"], o2o["scores"]
+        if isinstance(boxes, (list, tuple)) and isinstance(scores, (list, tuple)):
+            return boxes[0], scores[0], boxes[1], scores[1], boxes[2], scores[2]
+        return boxes, scores
 
 
 class DetectOne2ManyWrapper(torch.nn.Module):
@@ -118,18 +143,18 @@ class DetectOne2ManyWrapper(torch.nn.Module):
         o2m = preds.get("one2many", preds)
         if isinstance(o2m, list):
             return (
-                o2m[0]["boxes"],
-                o2m[0]["scores"],
-                o2m[1]["boxes"],
-                o2m[1]["scores"],
-                o2m[2]["boxes"],
-                o2m[2]["scores"],
+                o2m[0]["boxes"], o2m[0]["scores"],
+                o2m[1]["boxes"], o2m[1]["scores"],
+                o2m[2]["boxes"], o2m[2]["scores"],
             )
-        return o2m["boxes"], o2m["scores"]
+        boxes, scores = o2m["boxes"], o2m["scores"]
+        if isinstance(boxes, (list, tuple)) and isinstance(scores, (list, tuple)):
+            return boxes[0], scores[0], boxes[1], scores[1], boxes[2], scores[2]
+        return boxes, scores
 
 
 class SegmentOne2OneWrapper(torch.nn.Module):
-    """Export one-to-one branch outputs and proto tensors for QAT segmentation inference."""
+    """Export flattened one-to-one predictions and proto tensors for segmentation inference."""
 
     def __init__(self, qat_model: torch.nn.Module):
         super().__init__()
@@ -137,15 +162,14 @@ class SegmentOne2OneWrapper(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         preds = self.qat_model(x)["one2one"]
+        boxes = tuple(preds["boxes"]) if isinstance(preds["boxes"], list) else (preds["boxes"],)
+        scores = tuple(preds["scores"]) if isinstance(preds["scores"], list) else (preds["scores"],)
         proto = preds["proto"]
         proto_outputs = tuple(proto) if isinstance(proto, (tuple, list)) else (proto,)
         return (
-            preds["boxes"],
-            preds["scores"],
+            *boxes,
+            *scores,
             preds["mask_coefficient"],
-            preds["feats"][0],
-            preds["feats"][1],
-            preds["feats"][2],
             *proto_outputs,
         )
 
@@ -203,49 +227,71 @@ def ensure_main_opset(proto, version: int) -> None:
             ensure_main_opset(function, version)
 
 
-def build_quantized_model(cfg: ExportDefaults, quant_config: str, device: str, qat_onnx_imgsz: list[int]):
+def build_quantized_model(
+    cfg: ExportDefaults,
+    quant_config: str,
+    device: str,
+    qat_onnx_imgsz: list[int],
+    export_pth: bool = False,
+):
     model = YOLO(cfg.model, task=cfg.task).load(cfg.pretrained)
+    weight_dict = None
+    train_args = {}
 
     # Load checkpoint metadata to detect training config
     if cfg.qat_weights and Path(cfg.qat_weights).exists():
         weight_dict = torch.load(cfg.qat_weights, weights_only=False)
         train_args = weight_dict.get("train_args", {})
-        ckpt_quant_config = train_args.get("qat_config", None) if isinstance(train_args, dict) else None
-        if ckpt_quant_config and Path(ckpt_quant_config).exists():
-            quant_config = ckpt_quant_config
+        ckpt_quant_config = (
+            train_args.get("qat_config", None)
+            if isinstance(train_args, dict)
+            else getattr(train_args, "qat_config", None)
+        )
+        if ckpt_quant_config and resolve_qat_config_path(ckpt_quant_config).is_file():
+            quant_config = str(resolve_qat_config_path(ckpt_quant_config))
             print(f"Using quant config from checkpoint: {quant_config}")
 
-    global_config, regional_configs = ax_load_config(quant_config)
-    quantizer = AXQuantizer()
-    quantizer.set_global(global_config)
-    quantizer.set_regional(regional_configs)
+    quant_config = str(resolve_qat_config_path(quant_config))
 
-    float_model = model.model.to(device)
+    if isinstance(train_args, dict):
+        dynamic_batch_max = int(train_args.get("qat_dynamic_batch_max", 128))
+        use_lsq = bool(train_args.get("qat_lsq", False))
+    else:
+        dynamic_batch_max = int(getattr(train_args, "qat_dynamic_batch_max", 128))
+        use_lsq = bool(getattr(train_args, "qat_lsq", False))
+    float_model = model.model.to(device).train()
+    height, width = qat_onnx_imgsz[-2:]
     inputs = torch.rand(*qat_onnx_imgsz, device=device)
     print("start export!")
-    exported_model = torch.export.export_for_training(
-        float_model,
-        (inputs,),
-        dynamic_shapes={"x": {0: 1, 2: Dim.AUTO, 3: Dim.AUTO}},
+    _, prepared_model = prepare_pt2e_qat_model(
+        float_model=float_model,
+        device=device,
+        config_path=quant_config,
+        imgsz=(height, width),
+        dynamic_batch_max=dynamic_batch_max,
+        use_lsq=use_lsq,
     )
-    print("export training model done!")
-    exported_module = exported_model.module()
+    print("prepared training graph done!")
 
-    prepared_model = prepare_qat_pt2e(exported_module, quantizer)
-    print("prepared model done!")
-    torch.ao.quantization.allow_exported_model_train_eval(prepared_model)
-
-    if cfg.qat_weights and Path(cfg.qat_weights).exists():
-        weight_dict = torch.load(cfg.qat_weights, weights_only=False)
+    if weight_dict is not None:
         qat_weight_dict = weight_dict.get("qat_ema") or weight_dict.get("qat_model")
         if qat_weight_dict is None:
             raise KeyError("Checkpoint missing 'qat_ema' and 'qat_model' keys")
-        torch.save(qat_weight_dict, cfg.qat_state_out)
+        if export_pth:
+            torch.save(qat_weight_dict, cfg.qat_state_out)
+            print(f"export QAT state dict to [{cfg.qat_state_out}] done!")
         prepared_model.load_state_dict(qat_weight_dict)
         print("load_state_dict done!")
     else:
-        print("skip weight loading (no checkpoint)")
+        print("skip weight loading (no checkpoint); initialize observers with one random batch")
+
+    # Loaded observer buffers may retain the checkpoint device. Uninitialized observers also
+    # need one target-device forward so calculate_qparams does not create defaults on CUDA0.
+    prepared_model.to(device)
     prepared_model.eval()
+    if weight_dict is None:
+        with torch.no_grad():
+            prepared_model(inputs)
 
     quantized_model = convert_pt2e(prepared_model)
     print("convert_pt2e done!")
@@ -265,31 +311,24 @@ def build_export_plan(task: str, quantized_model: torch.nn.Module, inputs: torch
     if task == "detect":
         if end2end:
             return DetectOne2OneWrapper(quantized_model), [
-                "boxes_p3",
-                "scores_p3",
-                "boxes_p4",
-                "scores_p4",
-                "boxes_p5",
-                "scores_p5",
+                "boxes_p3", "scores_p3", "boxes_p4", "scores_p4", "boxes_p5", "scores_p5",
             ]
         else:
             return DetectOne2ManyWrapper(quantized_model), [
-                "boxes_p3",
-                "scores_p3",
-                "boxes_p4",
-                "scores_p4",
-                "boxes_p5",
-                "scores_p5",
+                "boxes_p3", "scores_p3",
+                "boxes_p4", "scores_p4",
+                "boxes_p5", "scores_p5",
             ]
     if task == "segment":
         proto_names = get_segment_proto_names(sample_outputs["one2one"]["proto"])
         output_names = [
-            "boxes",
-            "scores",
+            "boxes_p3",
+            "boxes_p4",
+            "boxes_p5",
+            "scores_p3",
+            "scores_p4",
+            "scores_p5",
             "mask_coefficient",
-            "feat_p3",
-            "feat_p4",
-            "feat_p5",
             *proto_names,
         ]
         return SegmentOne2OneWrapper(quantized_model), output_names
@@ -299,9 +338,10 @@ def build_export_plan(task: str, quantized_model: torch.nn.Module, inputs: torch
 def _fix_qdq_qdq_mismatch(model: onnx.ModelProto, threshold: float = 1.02) -> int:
     """Insert Identity (requant) nodes between adjacent Q-DQ pairs with mismatched quantization.
 
-    In a Q→DQ→Q chain, if the first Q's scale and the second Q's scale differ beyond ``threshold`` (or their zero_points
-    differ), deployment tools cannot fuse them into a single requant operation. Inserting an explicit Identity node
-    severs the adjacency and marks the position where a **requant** (dequantize→requantize) is required.
+    In a Q→DQ→Q chain, if the first Q's scale and the second Q's scale differ beyond
+    ``threshold`` (or their zero_points differ), deployment tools cannot fuse them into a
+    single requant operation.  Inserting an explicit Identity node severs the adjacency and
+    marks the position where a **requant** (dequantize→requantize) is required.
     """
     import numpy as np
     from onnx import helper
@@ -312,12 +352,10 @@ def _fix_qdq_qdq_mismatch(model: onnx.ModelProto, threshold: float = 1.02) -> in
     for dq_node in model.graph.node:
         if dq_node.op_type != "DequantizeLinear":
             continue
-        q_first = next(
-            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None
-        )
-        q_second = next(
-            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and dq_node.output[0] in n.input), None
-        )
+        q_first = next((n for n in model.graph.node
+                       if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None)
+        q_second = next((n for n in model.graph.node
+                        if n.op_type == "QuantizeLinear" and dq_node.output[0] in n.input), None)
         if q_first is None or q_second is None:
             continue
 
@@ -368,8 +406,8 @@ def _fix_qdq_qdq_mismatch(model: onnx.ModelProto, threshold: float = 1.02) -> in
 def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int:
     """Merge adjacent DQ→Q pairs with nearly identical scales into a single pass-through.
 
-    PT2E may insert redundant DQ→Q pairs between adjacent layers when their observer scales differ slightly (< 2%).
-    These pairs are a no-op passthrough that can be eliminated.
+    PT2E may insert redundant DQ→Q pairs between adjacent layers when their observer scales
+    differ slightly (< 2%). These pairs are a no-op passthrough that can be eliminated.
     """
     import numpy as np
 
@@ -382,9 +420,8 @@ def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int
             continue
 
         # Find Q that directly consumes this DQ output
-        q_next = next(
-            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and dq_node.output[0] == n.input[0]), None
-        )
+        q_next = next((n for n in model.graph.node
+                       if n.op_type == "QuantizeLinear" and dq_node.output[0] == n.input[0]), None)
         if q_next is None:
             continue
 
@@ -394,9 +431,8 @@ def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int
             continue
 
         # Find Q that feeds this DQ
-        q_prev = next(
-            (n for n in model.graph.node if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None
-        )
+        q_prev = next((n for n in model.graph.node
+                       if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None)
         if q_prev is None:
             continue
 
@@ -492,19 +528,22 @@ def _merge_adjacent_dq_q(model: onnx.ModelProto, threshold: float = 1.02) -> int
 def _split_shared_mul_dequant(model: onnx.ModelProto) -> int:
     """Split DequantizeLinear nodes that feed into multiple Mul ops.
 
-    When a single DQ output is consumed by two or more Mul nodes, deployment tools may fail to relate the separate
-    DQ→Mul→Q chains back to a shared quantized tensor. Creating per-Mul copies of the DQ resolves this.
+    When a single DQ output is consumed by two or more Mul nodes, deployment
+    tools may fail to relate the separate DQ→Mul→Q chains back to a shared
+    quantized tensor.  Creating per-Mul copies of the DQ resolves this.
     """
+    import numpy as np
     from onnx import helper
 
-    {i.name: onnx.numpy_helper.to_array(i) for i in model.graph.initializer}
+    init_dict = {i.name: onnx.numpy_helper.to_array(i) for i in model.graph.initializer}
     new_nodes = []
     split_count = 0
 
     for dq_node in model.graph.node:
         if dq_node.op_type != "DequantizeLinear":
             continue
-        mul_consumers = [n for n in model.graph.node if n.op_type == "Mul" and dq_node.output[0] in n.input]
+        mul_consumers = [n for n in model.graph.node
+                         if n.op_type == "Mul" and dq_node.output[0] in n.input]
         if len(mul_consumers) <= 1:
             continue
 
@@ -538,8 +577,198 @@ def _split_shared_mul_dequant(model: onnx.ModelProto) -> int:
     return split_count
 
 
-def export_onnx(export_wrapper: torch.nn.Module, inputs: torch.Tensor, out_path: str, output_names: list[str]) -> None:
-    onnx_program = torch.onnx.export(export_wrapper, (inputs,), dynamo=True, opset_version=21)
+def _merge_near_equal_requant(model: onnx.ModelProto, scale_threshold: float = 1.02, zp_tol: int = 1) -> int:
+    """严格合并 onnx 导出/slim 把量化图里【同一 observer】拆成的近乎等价冗余重量化。
+
+    量化图(prepare/convert_pt2e)里 silu output 与下游共享同一 observer、零 requant；
+    torch.onnx.export(dynamo) 分解 silu + slim 会把它拆成 scale 微异的 Q/DQ，产生冗余重量化。
+    结构：q_prev → dq_node → q_next → dq_next，其中 dq_node 可能 fan-out（silu 输出喂多个分支）。
+    严格条件(全满足才合并)：scale 比 < scale_threshold、|zp 差| <= zp_tol、四个量化点 dtype 全一致、
+    q_next 单消费者且为 DQ。合并：把 dq_next 的消费者改回直接用 dq_node 输出、删 q_next+dq_next
+    （保留 dq_node 供其他 fan-out 分支），等价于把该分支统一到上游 scale/zp、零精度损失。
+    """
+    import numpy as np
+
+    init_dict = {i.name: onnx.numpy_helper.to_array(i) for i in model.graph.initializer}
+    zp_dt = {i.name: i.data_type for i in model.graph.initializer}
+    removals: set = set()
+    merged = 0
+
+    for dq_node in list(model.graph.node):
+        if dq_node.op_type != "DequantizeLinear":
+            continue
+        q_prev = next((n for n in model.graph.node
+                       if n.op_type == "QuantizeLinear" and n.output[0] == dq_node.input[0]), None)
+        if q_prev is None:
+            continue
+        s_dq = float(init_dict.get(dq_node.input[1], np.array([0])).flatten()[0])
+        if s_dq < 1e-10:
+            continue
+        zp_dq = int(init_dict.get(dq_node.input[2], np.array([0])).flatten()[0])
+
+        # dq_node 的每个 Q 消费者（fan-out：其中一些是冗余重量化分支）
+        for q_next in [n for n in model.graph.node
+                       if n.op_type == "QuantizeLinear" and dq_node.output[0] in n.input]:
+            if q_next.name in removals:
+                continue
+            # 严格：q_next 单消费者且为 DQ（只处理 Q→DQ 这对重量化）
+            q_next_cons = [n for n in model.graph.node if q_next.output[0] in n.input]
+            if len(q_next_cons) != 1 or q_next_cons[0].op_type != "DequantizeLinear":
+                continue
+            dq_next = q_next_cons[0]
+
+            s_q = float(init_dict.get(q_next.input[1], np.array([0])).flatten()[0])
+            if s_q < 1e-10:
+                continue
+            if max(s_dq, s_q) / min(s_dq, s_q) >= scale_threshold:
+                continue
+            zp_q = int(init_dict.get(q_next.input[2], np.array([0])).flatten()[0])
+            if abs(zp_dq - zp_q) > zp_tol:
+                continue
+            # dtype 严格一致（四个量化点同位宽）
+            dts = {zp_dt.get(x) for x in (q_prev.input[2], dq_node.input[2], q_next.input[2], dq_next.input[2])}
+            if len(dts) != 1 or None in dts:
+                continue
+
+            # 合并：dq_next 的所有消费者改用 dq_node.output（保留 dq_node，fan-out 安全）；删 q_next + dq_next
+            for c in model.graph.node:
+                for i, inp in enumerate(c.input):
+                    if inp == dq_next.output[0]:
+                        c.input[i] = dq_node.output[0]
+            removals.add(q_next.name)
+            removals.add(dq_next.name)
+            merged += 1
+
+    if removals:
+        new_nodes = [n for n in model.graph.node if n.name not in removals]
+        del model.graph.node[:]
+        model.graph.node.extend(new_nodes)
+    return merged
+
+
+def _align_split_reshape_quantization(model: onnx.ModelProto) -> int:
+    """Align safe Split fan-out Reshape Q/DQ ranges for AXERA backends.
+
+    AXERA NPU treats Split as a passive operator and forces its input/output quantization
+    parameters to match. If one Split output also feeds a Reshape branch with a smaller
+    Q/DQ range, the backend may incorrectly select that smaller range for the whole Split.
+    Replace only same-dtype scalar Reshape Q/DQ parameters whose range is fully covered by
+    the Split input range. New initializers keep unrelated users of shared parameters intact.
+    """
+    import numpy as np
+
+    graph = model.graph
+    initializers = {initializer.name: initializer for initializer in graph.initializer}
+    producers = {output: node for node in graph.node for output in node.output if output}
+    consumers: dict[str, list] = {}
+    for node in graph.node:
+        for input_name in node.input:
+            consumers.setdefault(input_name, []).append(node)
+
+    used_names = set(initializers) | {value.name for value in graph.input} | {value.name for value in graph.output}
+    used_names.update(output for node in graph.node for output in node.output if output)
+
+    def quant_params(node):
+        if node is None or node.op_type not in {"QuantizeLinear", "DequantizeLinear"} or len(node.input) < 3:
+            return None
+        scale_init = initializers.get(node.input[1])
+        zp_init = initializers.get(node.input[2])
+        if scale_init is None or zp_init is None:
+            return None
+        scale = onnx.numpy_helper.to_array(scale_init)
+        zero_point = onnx.numpy_helper.to_array(zp_init)
+        if scale.size != 1 or zero_point.size != 1 or zero_point.dtype.kind not in "iu":
+            return None
+        return scale, zero_point
+
+    def quant_range(scale, zero_point):
+        limits = np.iinfo(zero_point.dtype)
+        step = float(scale.reshape(-1)[0])
+        zp = int(zero_point.reshape(-1)[0])
+        return (limits.min - zp) * step, (limits.max - zp) * step
+
+    def unique_name(base: str) -> str:
+        candidate = base
+        suffix = 1
+        while candidate in used_names:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used_names.add(candidate)
+        return candidate
+
+    aligned = 0
+    for split in [node for node in graph.node if node.op_type == "Split" and node.input]:
+        split_input_qdq = producers.get(split.input[0])
+        split_params = quant_params(split_input_qdq)
+        if split_params is None:
+            continue
+        split_scale, split_zp = split_params
+        split_lo, split_hi = quant_range(split_scale, split_zp)
+
+        for split_output in split.output:
+            branch_consumers = consumers.get(split_output, [])
+            if len(branch_consumers) < 2:
+                continue
+            for reshape in [node for node in branch_consumers if node.op_type == "Reshape" and node.output]:
+                reshape_qs = [node for node in consumers.get(reshape.output[0], []) if node.op_type == "QuantizeLinear"]
+                if len(reshape_qs) != 1:
+                    continue
+                reshape_q = reshape_qs[0]
+                reshape_dqs = [
+                    node for node in consumers.get(reshape_q.output[0], []) if node.op_type == "DequantizeLinear"
+                ]
+                if not reshape_dqs:
+                    continue
+                reshape_params = quant_params(reshape_q)
+                if reshape_params is None:
+                    continue
+                reshape_scale, reshape_zp = reshape_params
+                if split_scale.dtype != reshape_scale.dtype or split_zp.dtype != reshape_zp.dtype:
+                    continue
+                if np.array_equal(split_scale, reshape_scale) and np.array_equal(split_zp, reshape_zp):
+                    continue
+
+                reshape_lo, reshape_hi = quant_range(reshape_scale, reshape_zp)
+                tolerance = max(abs(split_lo), abs(split_hi), 1.0) * 1e-7
+                if split_lo > reshape_lo + tolerance or split_hi < reshape_hi - tolerance:
+                    continue
+
+                base = reshape.name.replace("/", "_").replace(".", "_") or "reshape"
+                scale_name = unique_name(f"{base}_split_input_scale")
+                zp_name = unique_name(f"{base}_split_input_zero_point")
+                scale_init = onnx.numpy_helper.from_array(split_scale.copy(), scale_name)
+                zp_init = onnx.numpy_helper.from_array(split_zp.copy(), zp_name)
+                graph.initializer.extend([scale_init, zp_init])
+                initializers[scale_name] = scale_init
+                initializers[zp_name] = zp_init
+
+                for node in [reshape_q, *reshape_dqs]:
+                    node.input[1] = scale_name
+                    node.input[2] = zp_name
+
+                print(
+                    f"  split-reshape quant @ {reshape.name} <- {split.name}: "
+                    f"range [{reshape_lo:.4f}, {reshape_hi:.4f}] -> [{split_lo:.4f}, {split_hi:.4f}]"
+                )
+                aligned += 1
+
+    return aligned
+
+
+def export_onnx(
+    export_wrapper: torch.nn.Module,
+    inputs: torch.Tensor,
+    out_path: str,
+    output_names: list[str],
+    fix_split_reshape_quant: bool = True,
+) -> None:
+    onnx_program = torch.onnx.export(
+        export_wrapper,
+        (inputs,),
+        dynamo=True,
+        opset_version=21,
+        output_names=output_names,
+    )
     onnx_program.optimize()
     onnx_program.save(out_path)
     print(f"export qat model to [{out_path}] done!")
@@ -547,6 +776,9 @@ def export_onnx(export_wrapper: torch.nn.Module, inputs: torch.Tensor, out_path:
     model_simp = slim(onnx.load(out_path))
     ensure_main_opset(model_simp, REQUIRED_ONNX_OPSET)
     removed_outputs = remove_invalid_graph_outputs(model_simp)
+    n_merged_ne = _merge_near_equal_requant(model_simp)
+    if n_merged_ne:
+        print(f"merged {n_merged_ne} near-equal requant (严格: scale<2% + |zp|<=1 + dtype一致 + q单消费者, fan-out安全)")
     n_fixed = _fix_qdq_qdq_mismatch(model_simp)
     if n_fixed:
         print(f"inserted {n_fixed} requant marker(s) where Q→DQ→Q scales diverge")
@@ -556,6 +788,10 @@ def export_onnx(export_wrapper: torch.nn.Module, inputs: torch.Tensor, out_path:
     n_merged = _merge_adjacent_dq_q(model_simp)
     if n_merged:
         print(f"merged {n_merged} redundant DQ→Q pair(s) with near-identical scales")
+    if fix_split_reshape_quant:
+        n_aligned = _align_split_reshape_quantization(model_simp)
+        if n_aligned:
+            print(f"aligned {n_aligned} Split fan-out Reshape quantization range(s) for AXERA NPU")
     sim_path = out_path.replace(".onnx", "_slim.onnx")
     onnx.save(model_simp, sim_path)
     onnx.checker.check_model(model_simp)
@@ -575,10 +811,24 @@ def main() -> None:
         f"qat_weights={cfg.qat_weights}, out={output_path}"
     )
 
-    quantized_model, inputs = build_quantized_model(cfg, args.quant_config, args.device, qat_onnx_imgsz)
+    quantized_model, inputs = build_quantized_model(
+        cfg,
+        args.quant_config,
+        args.device,
+        qat_onnx_imgsz,
+        export_pth=args.export_pth,
+    )
     export_wrapper, output_names = build_export_plan(cfg.task, quantized_model, inputs, end2end=args.end2end)
-    export_onnx(export_wrapper, inputs, output_path, output_names)
+    export_onnx(
+        export_wrapper,
+        inputs,
+        output_path,
+        output_names,
+        fix_split_reshape_quant=args.fix_split_reshape_quant,
+    )
 
 
 if __name__ == "__main__":
     main()
+# python export.py --task segment
+# codex resume 019d0515-c4ad-7991-9fdc-a578b0446277

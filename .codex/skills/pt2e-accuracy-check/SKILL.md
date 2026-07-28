@@ -33,7 +33,6 @@ description: 在 QAT 仓库中，当任务涉及 torch.export.export_for_trainin
 
 优先复用：
 
-- `scripts/repro_torch_pt2e_bn_hparams.py`
 - `tests/test_pt2e_bn_patch.py`
 - `ultralytics/utils/pt2e_bn_patch.py`
 
@@ -59,8 +58,8 @@ description: 在 QAT 仓库中，当任务涉及 torch.export.export_for_trainin
 
 ### 4. 仓库内约定
 
-- Python 环境固定使用 `/home/heqi/miniforge3/envs/torch2.6/bin/python`
-- 需要跑实际验证时，优先在 1 号卡执行
+- 先激活项目兼容的 PyTorch 2.6 QAT 环境，再使用当前环境的 `python`；不要在 skill 中写死本机解释器路径。
+- 需要跑实际验证时选择空闲 GPU；结构和小样本数值对齐可使用 CPU
 - 当前仓库常见案例是 YOLO，但此 skill 适用于任意使用 BatchNorm 的 PT2E/QAT 模型
 - 用户若只问根因，先给结论，再给实验过程
 - 如需保留 `dynamo_float.onnx`、`float.onnx`、`float_sim.onnx` 这类调试产物，三者都应优先对应 training graph；若简化失败，可保留未简化训练图副本，但不要降级成 eval 导出

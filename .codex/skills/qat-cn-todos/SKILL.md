@@ -9,7 +9,7 @@ description: 中文 QAT 任务落地协议。用于在 QAT.Ultralytics 仓库中
 
 - 将 todo 条目快速转为可提交实现。
 - 保持中文沟通、连续推进、最少确认。
-- 适配当前仓库：QAT 模型调试，固定 Python 环境 `/home/heqi/miniforge3/envs/torch2.6`。
+- 适配当前仓库：QAT 模型调试；运行前激活项目兼容的 Python/QAT 环境。
 
 ## 能力选择
 
@@ -24,7 +24,7 @@ description: 中文 QAT 任务落地协议。用于在 QAT.Ultralytics 仓库中
 1. 读取 `todos/project-description.md`。
 2. 若不存在，基于 `templates/project-description.md` 创建。
 3. 确保目录存在：`todos/work`、`todos/done`。
-4. 在执行 Python 命令时优先使用 `/home/heqi/miniforge3/envs/torch2.6/bin/python`。
+4. 在执行 Python 命令前确认已激活项目兼容环境，并使用当前环境的 `python`。
 
 ### 2. SELECT
 
@@ -57,7 +57,7 @@ description: 中文 QAT 任务落地协议。用于在 QAT.Ultralytics 仓库中
 1. 汇总改动、验证命令与结果。
 2. 生成提交信息：`[任务标题]: [变更摘要]`。
 3. 单次确认后执行提交。
-4. 归档到 `todos/done/<task-dir>/` 并保留 `task.md`、`analysis.md`。
+4. 归档到 `todos/done/<task-dir>/` 并保留 `task.md`、`analysis.md`。`todos/` 是本地记录，不随交付代码提交。
 
 ## 模板文件
 

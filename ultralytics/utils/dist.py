@@ -60,7 +60,30 @@ def generate_ddp_file(trainer: BaseTrainer) -> str:
 
         overrides["augmentations"] = [A.to_dict(t) for t in overrides["augmentations"]]
 
-    content = f"""
+    if getattr(trainer.args, "qat", False):
+        content = f"""
+# Ultralytics Multi-GPU PT2E QAT temp file (should be automatically deleted after use)
+from pathlib import Path, PosixPath  # For model arguments stored as Path instead of str
+overrides = {overrides}
+
+if __name__ == "__main__":
+    from ultralytics import YOLO
+
+    if overrides.get("augmentations") is not None:
+        import albumentations as A
+        overrides["augmentations"] = [A.from_dict(t) for t in overrides["augmentations"]]
+
+    model_path = overrides.pop("model")
+    pretrained = overrides.pop("pretrained", None)
+    overrides.pop("save_dir", None)
+    if not isinstance(pretrained, (str, Path)):
+        raise ValueError("Multi-GPU PT2E QAT requires an explicit pretrained checkpoint path")
+    model = YOLO(model_path, task=overrides.get("task"))
+    model.load(pretrained)
+    model.train(**overrides)
+"""
+    else:
+        content = f"""
 # Ultralytics Multi-GPU training temp file (should be automatically deleted after use)
 from pathlib import Path, PosixPath  # For model arguments stored as Path instead of str
 overrides = {overrides}

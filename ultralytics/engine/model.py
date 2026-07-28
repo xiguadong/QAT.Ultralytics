@@ -18,6 +18,7 @@ from ultralytics.utils import (
     ARGV,
     ASSETS,
     DEFAULT_CFG_DICT,
+    LOCAL_RANK,
     LOGGER,
     RANK,
     SETTINGS,
@@ -25,7 +26,8 @@ from ultralytics.utils import (
     callbacks,
     checks,
 )
-from ultralytics.utils.qat_utils import prepare_pt2e_qat_model
+import ultralytics.utils.quantized_decomposed_dequantize_per_channel
+from ultralytics.utils.qat_utils import prepare_pt2e_qat_model, resolve_qat_config_path
 
 
 class Model(torch.nn.Module):
@@ -777,8 +779,10 @@ class Model(torch.nn.Module):
         if not args.get("resume"):  # manually set model only if not resuming
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model
-        if args.get("qat"):
+        if args.get("qat") and not self.trainer.ddp:
             self._prepare_qat_training(args)
+        elif args.get("qat"):
+            LOGGER.info("PT2E QAT graph preparation is deferred to each DDP rank.")
 
         self.trainer.train()
         # Update model and cfg after training
@@ -786,7 +790,8 @@ class Model(torch.nn.Module):
             if args.get("qat"):
                 self.model = self.trainer.model
                 self.ckpt = {}
-                self.overrides = self._reset_ckpt_args(self.model.args)
+                model_args = args if self.trainer.ddp else self.model.args
+                self.overrides = self._reset_ckpt_args(model_args)
             else:
                 ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last
                 self.model, self.ckpt = load_checkpoint(ckpt)
@@ -796,34 +801,39 @@ class Model(torch.nn.Module):
 
     def _prepare_qat_training(self, args: dict[str, Any]) -> None:
         """Prepare a PT2E QAT graph for the trainer."""
-        if self.trainer.world_size > 1:
-            raise NotImplementedError("PT2E QAT is currently supported for single-device training only.")
-
         trainer_args = vars(self.trainer.args) if getattr(self.trainer, "args", None) is not None else {}
         effective_args = {**args, **trainer_args}
 
-        config_path = Path(effective_args.get("qat_config") or "config.json")
+        qat_device = self.trainer.device
+        if self.trainer.world_size > 1:
+            if LOCAL_RANK < 0:
+                raise RuntimeError("Multi-GPU PT2E QAT preparation must run inside a distributed worker")
+            qat_device = torch.device("cuda", LOCAL_RANK)
+            self.trainer.device = qat_device
+
+        config_path = resolve_qat_config_path(effective_args.get("qat_config") or "config-qat/config.json")
         if not config_path.exists():
             raise FileNotFoundError(f"QAT config file not found: {config_path}")
 
         source_model = self.trainer.model if isinstance(self.trainer.model, torch.nn.Module) else self.model
         if not isinstance(source_model, torch.nn.Module):
             source_model, _ = load_checkpoint(str(self.trainer.model), device="cpu", fuse=False)
-        float_model = deepcopy(source_model).float().to(self.trainer.device).train()
+        float_model = deepcopy(source_model).float().to(qat_device).train()
         for param in float_model.parameters():
             if param.dtype.is_floating_point and not param.requires_grad:
                 param.requires_grad_(True)
-        self._export_qat_debug_onnx(float_model, effective_args)
+        if RANK in {-1, 0}:
+            self._export_qat_debug_onnx(float_model, effective_args)
         self.trainer.teacher_model = None
         if effective_args.get("qat_kd"):
-            teacher_model = deepcopy(float_model).float().to(self.trainer.device).eval()
+            teacher_model = deepcopy(float_model).float().to(qat_device).eval()
             teacher_model.requires_grad_(False)
             self.trainer.teacher_model = teacher_model
             LOGGER.info("Prepared frozen float teacher for QAT KD training.")
 
         _, prepared_model = prepare_pt2e_qat_model(
             float_model=float_model,
-            device=self.trainer.device,
+            device=qat_device,
             config_path=config_path,
             imgsz=self.trainer.args.imgsz,
             dynamic_batch_max=effective_args.get("qat_dynamic_batch_max", 128),
@@ -840,7 +850,6 @@ class Model(torch.nn.Module):
         ckpt_qat_ema = self.ckpt.get("qat_ema") if isinstance(self.ckpt, dict) else None
         if ckpt_qat_ema is not None and effective_args.get("qat_ema", True):
             from ultralytics.utils.torch_utils import ModelEMA
-
             self.trainer.qat_ema = ModelEMA(prepared_model, decay=0.9999, tau=2000)
             self.trainer.qat_ema.ema.load_state_dict(ckpt_qat_ema)
             self.trainer.qat_ema.updates = self.ckpt.get("qat_ema_updates", 0)

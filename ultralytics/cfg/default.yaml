@@ -42,7 +42,7 @@ freeze: # (int | list, optional) freeze first N layers (int) or specific layer i
 multi_scale: 0.0 # (float) multi-scale range as a fraction of imgsz; sizes are rounded to stride multiples
 compile: False # (bool | str) enable torch.compile() backend='inductor'; True="default", False=off, or "default|reduce-overhead|max-autotune-no-cudagraphs"
 qat: False # (bool) enable PT2E quantization-aware training graph preparation
-qat_config: config.json # (str) quantizer config path used when `qat=True`
+qat_config: config-qat/config.json # (str) quantizer config path used when `qat=True`
 qat_dynamic_batch_max: 128 # (int) max dynamic batch size for exported PT2E training graph
 qat_validate: False # (bool) run validation on the PT2E QAT graph during training
 qat_kd: False # (bool) enable knowledge distillation from a float teacher during QAT training

@@ -133,11 +133,7 @@ class Detect(nn.Module):
         self._end2end = value
 
     def forward_head(
-        self,
-        x: list[torch.Tensor],
-        box_head: torch.nn.Module = None,
-        cls_head: torch.nn.Module = None,
-        concat_flag: bool = True,
+        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None, concat_flag: bool = True
     ) -> dict[str, torch.Tensor]:
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         if box_head is None or cls_head is None:  # for fused inference
@@ -145,10 +141,11 @@ class Detect(nn.Module):
         bs = x[0].shape[0]  # batch size
         if concat_flag:
             boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
-            torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+            sres = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
         else:
             boxes = [box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)]
-            scores = [cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)]
+            _cs = getattr(self, "cls_sigmoid_inplace", False)
+            scores = [(cls_head[i](x[i]).sigmoid() if _cs else cls_head[i](x[i])).view(bs, self.nc, -1) for i in range(self.nl)]
         return dict(boxes=boxes, scores=scores, feats=x)
 
     def forward(
@@ -163,37 +160,22 @@ class Detect(nn.Module):
         if self.training:
             return preds
 
-        if isinstance(preds, dict) and "one2one" in preds:
-            preds["one2many"]["boxes"] = (
-                torch.cat(preds["one2many"]["boxes"], dim=-1)
-                if isinstance(preds["one2many"]["boxes"], list)
-                else preds["one2many"]["boxes"]
-            )
-            preds["one2many"]["scores"] = (
-                torch.cat(preds["one2many"]["scores"], dim=-1)
-                if isinstance(preds["one2many"]["scores"], list)
-                else preds["one2many"]["scores"]
-            )
-            preds["one2one"]["boxes"] = (
-                torch.concat(preds["one2one"]["boxes"], dim=-1)
-                if isinstance(preds["one2one"]["boxes"], list)
-                else preds["one2one"]["boxes"]
-            )
-            preds["one2one"]["scores"] = (
-                torch.concat(preds["one2one"]["scores"], dim=-1)
-                if isinstance(preds["one2one"]["scores"], list)
-                else preds["one2one"]["scores"]
-            )
+        if isinstance(preds, dict) and 'one2one' in preds:
+            if preds['one2many']:  # fuse() 置 cv2/cv3=None → one2many 空 dict；eval 只需 one2one，跳过
+                preds['one2many']['boxes'] = torch.cat(preds['one2many']['boxes'], dim=-1) if isinstance(preds['one2many']['boxes'], list) else preds['one2many']['boxes']
+                preds['one2many']['scores'] = torch.cat(preds['one2many']['scores'], dim=-1) if isinstance(preds['one2many']['scores'], list) else preds['one2many']['scores']
+            preds['one2one']['boxes'] = torch.concat(preds['one2one']['boxes'], dim=-1) if isinstance(preds['one2one']['boxes'], list) else preds['one2one']['boxes']
+            preds['one2one']['scores'] = torch.concat(preds['one2one']['scores'], dim=-1) if isinstance(preds['one2one']['scores'], list) else preds['one2one']['scores']
         else:
             if isinstance(preds, list):
                 preds = {
-                    "boxes": torch.cat([p["boxes"] for p in preds], dim=-1),
-                    "scores": torch.cat([p["scores"] for p in preds], dim=-1),
-                    "feats": [p["feats"][0] for p in preds],
+                    'boxes': torch.cat([p['boxes'] for p in preds], dim=-1),
+                    'scores': torch.cat([p['scores'] for p in preds], dim=-1),
+                    'feats': [p['feats'][0] for p in preds],
                 }
             else:
-                preds["boxes"] = torch.cat(preds["boxes"], dim=-1)
-                preds["scores"] = torch.cat(preds["scores"], dim=-1)
+                preds['boxes'] = torch.cat(preds['boxes'], dim=-1)
+                preds['scores'] = torch.cat(preds['scores'], dim=-1)
         y = self._inference(preds["one2one"] if self.end2end else preds)
         if self.end2end:
             y = self.postprocess(y.permute(0, 2, 1))
@@ -210,7 +192,7 @@ class Detect(nn.Module):
         """
         # Inference path
         dbox = self._get_decode_boxes(x)
-        return torch.cat((dbox, x["scores"].sigmoid()), 1)
+        return torch.cat((dbox, x["scores"] if getattr(self, "cls_sigmoid_inplace", False) else x["scores"].sigmoid()), 1)
 
     def _get_decode_boxes(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Get decoded boxes based on anchors and strides."""
@@ -364,12 +346,7 @@ class Segment(Detect):
         return torch.cat([preds, x["mask_coefficient"]], dim=1)
 
     def forward_head(
-        self,
-        x: list[torch.Tensor],
-        box_head: torch.nn.Module,
-        cls_head: torch.nn.Module,
-        mask_head: torch.nn.Module,
-        concat_flag: bool = True,
+        self, x: list[torch.Tensor], box_head: torch.nn.Module, cls_head: torch.nn.Module, mask_head: torch.nn.Module, concat_flag: bool = True
     ) -> dict[str, torch.Tensor]:
         """Concatenates and returns predicted bounding boxes, class probabilities, and mask coefficients."""
         preds = super().forward_head(x, box_head, cls_head, concat_flag=concat_flag)

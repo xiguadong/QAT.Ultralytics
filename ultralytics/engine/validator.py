@@ -116,6 +116,7 @@ class BaseValidator:
         self.nc = None
         self.iouv = None
         self.jdict = None
+        self.distributed_validation = False
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
 
         self.save_dir = save_dir or get_save_dir(self.args)
@@ -130,11 +131,12 @@ class BaseValidator:
     @staticmethod
     def _get_trainer_pt2e_model(trainer):
         """Return the highest-priority PT2E model attached to the trainer."""
-        return (
+        model = (
             getattr(trainer, "export_model_eval", None)
             or getattr(trainer, "qat_model", None)
             or getattr(trainer, "export_model", None)
         )
+        return unwrap_model(model) if model is not None else None
 
     @staticmethod
     def _prepare_pt2e_model_for_eval(model):
@@ -200,6 +202,7 @@ class BaseValidator:
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
+            self.distributed_validation = trainer.world_size > 1
             pt2e_model = self._get_trainer_pt2e_model(trainer)
             loss_model = unwrap_model(trainer.model)
             if pt2e_model is not None and self.args.end2end is not None:

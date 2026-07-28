@@ -1,0 +1,4 @@
+interface:
+  display_name: "YOLO26 QAT Delivery"
+  short_description: "训练、导出并验收最终 YOLO26 QAT 交付模型"
+  default_prompt: "Use $yolo26-qat-delivery to train, export, and validate the final YOLO26 QAT model."
