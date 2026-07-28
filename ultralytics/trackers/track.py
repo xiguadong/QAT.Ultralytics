@@ -16,19 +16,14 @@ TRACKER_MAP = {"bytetrack": BYTETracker, "botsort": BOTSORT}
 
 
 def on_predict_start(predictor: object, persist: bool = False) -> None:
-    """
-    Initialize trackers for object tracking during prediction.
+    """Initialize trackers for object tracking during prediction.
 
     Args:
-        predictor (object): The predictor object to initialize trackers for.
-        persist (bool): Whether to persist the trackers if they already exist.
-
-    Raises:
-        AssertionError: If the tracker_type is not 'bytetrack' or 'botsort'.
-        ValueError: If the task is 'classify' as classification doesn't support tracking.
+        predictor (ultralytics.engine.predictor.BasePredictor): The predictor object to initialize trackers for.
+        persist (bool, optional): Whether to persist the trackers if they already exist.
 
     Examples:
-        Initialize trackers for a predictor object:
+        Initialize trackers for a predictor object
         >>> predictor = SomePredictorClass()
         >>> on_predict_start(predictor, persist=True)
     """
@@ -45,7 +40,8 @@ def on_predict_start(predictor: object, persist: bool = False) -> None:
         raise AssertionError(f"Only 'bytetrack' and 'botsort' are supported for now, but got '{cfg.tracker_type}'")
 
     predictor._feats = None  # reset in case used earlier
-    predictor.save_feats = False
+    if hasattr(predictor, "_hook"):
+        predictor._hook.remove()
     if cfg.tracker_type == "botsort" and cfg.with_reid and cfg.model == "auto":
         from ultralytics.nn.modules.head import Detect
 
@@ -54,15 +50,13 @@ def on_predict_start(predictor: object, persist: bool = False) -> None:
             and isinstance(predictor.model.model.model[-1], Detect)
             and not predictor.model.model.model[-1].end2end
         ):
-            cfg.model = "yolo11n-cls.pt"
+            cfg.model = "yolo26n-cls.pt"
         else:
-            predictor.save_feats = True
-
             # Register hook to extract input of Detect layer
             def pre_hook(module, input):
-                predictor._feats = [t.clone() for t in input[0]]
+                predictor._feats = list(input[0])  # unroll to new list to avoid mutation in forward
 
-            predictor.model.model.model[-1].register_forward_pre_hook(pre_hook)
+            predictor._hook = predictor.model.model.model[-1].register_forward_pre_hook(pre_hook)
 
     trackers = []
     for _ in range(predictor.dataset.bs):
@@ -75,12 +69,11 @@ def on_predict_start(predictor: object, persist: bool = False) -> None:
 
 
 def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None:
-    """
-    Postprocess detected boxes and update with object tracking.
+    """Postprocess detected boxes and update with object tracking.
 
     Args:
         predictor (object): The predictor object containing the predictions.
-        persist (bool): Whether to persist the trackers if they already exist.
+        persist (bool, optional): Whether to persist the trackers if they already exist.
 
     Examples:
         Postprocess predictions and update with tracking
@@ -97,8 +90,6 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
             predictor.vid_path[i if is_stream else 0] = vid_path
 
         det = (result.obb if is_obb else result.boxes).cpu().numpy()
-        if len(det) == 0:
-            continue
         tracks = tracker.update(det, result.orig_img, getattr(result, "feats", None))
         if len(tracks) == 0:
             continue
@@ -110,8 +101,7 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
 
 
 def register_tracker(model: object, persist: bool) -> None:
-    """
-    Register tracking callbacks to the model for object tracking during prediction.
+    """Register tracking callbacks to the model for object tracking during prediction.
 
     Args:
         model (object): The model object to register tracking callbacks for.

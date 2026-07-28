@@ -1,0 +1,4 @@
+interface:
+  display_name: "AXERA QuantONNX 配置"
+  short_description: "从 QAT ONNX 自动生成 Pulsar2 转换配置"
+  default_prompt: "Use $axera-quantonnx-config to generate an AXERA Pulsar2 configuration from a QAT QuantONNX model."

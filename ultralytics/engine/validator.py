@@ -3,59 +3,52 @@
 Check a model's accuracy on a test or val split of a dataset.
 
 Usage:
-    $ yolo mode=val model=yolo11n.pt data=coco8.yaml imgsz=640
+    $ yolo mode=val model=yolo26n.pt data=coco8.yaml imgsz=640
 
 Usage - formats:
-    $ yolo mode=val model=yolo11n.pt                 # PyTorch
-                          yolo11n.torchscript        # TorchScript
-                          yolo11n.onnx               # ONNX Runtime or OpenCV DNN with dnn=True
-                          yolo11n_openvino_model     # OpenVINO
-                          yolo11n.engine             # TensorRT
-                          yolo11n.mlpackage          # CoreML (macOS-only)
-                          yolo11n_saved_model        # TensorFlow SavedModel
-                          yolo11n.pb                 # TensorFlow GraphDef
-                          yolo11n.tflite             # TensorFlow Lite
-                          yolo11n_edgetpu.tflite     # TensorFlow Edge TPU
-                          yolo11n_paddle_model       # PaddlePaddle
-                          yolo11n.mnn                # MNN
-                          yolo11n_ncnn_model         # NCNN
-                          yolo11n_imx_model          # Sony IMX
-                          yolo11n_rknn_model         # Rockchip RKNN
+    $ yolo mode=val model=yolo26n.pt                 # PyTorch
+                          yolo26n.torchscript        # TorchScript
+                          yolo26n.onnx               # ONNX Runtime or OpenCV DNN with dnn=True
+                          yolo26n_openvino_model     # OpenVINO
+                          yolo26n.engine             # TensorRT
+                          yolo26n.mlpackage          # CoreML (macOS-only)
+                          yolo26n_saved_model        # TensorFlow SavedModel
+                          yolo26n.pb                 # TensorFlow GraphDef
+                          yolo26n.tflite             # TensorFlow Lite
+                          yolo26n_edgetpu.tflite     # TensorFlow Edge TPU
+                          yolo26n_paddle_model       # PaddlePaddle
+                          yolo26n.mnn                # MNN
+                          yolo26n_ncnn_model         # NCNN
+                          yolo26n_imx_model          # Sony IMX
+                          yolo26n_rknn_model         # Rockchip RKNN
 """
 
 import json
-import os
 import time
 from pathlib import Path
 
-from onnxslim import slim
-import onnx
-
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.nn.autobackend import AutoBackend
-from ultralytics.nn.modules.head import Detect, Segment
-from ultralytics.utils import LOGGER, TQDM, callbacks, colorstr, emojis
+from ultralytics.utils import LOGGER, RANK, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
-from ultralytics.utils.torch_utils import de_parallel, select_device, smart_inference_mode
+from ultralytics.utils.torch_utils import attempt_compile, select_device, smart_inference_mode, unwrap_model
 
-from ultralytics.utils.ax_quantizer import AXQuantizer
 
 class BaseValidator:
-    """
-    A base class for creating validators.
+    """A base class for creating validators.
 
     This class provides the foundation for validation processes, including model evaluation, metric computation, and
     result visualization.
 
     Attributes:
         args (SimpleNamespace): Configuration for the validator.
-        dataloader (DataLoader): Dataloader to use for validation.
-        pbar (tqdm): Progress bar to update during validation.
+        dataloader (DataLoader): DataLoader to use for validation.
         model (nn.Module): Model to validate.
         data (dict): Data dictionary containing dataset information.
         device (torch.device): Device to use for validation.
@@ -66,13 +59,15 @@ class BaseValidator:
         stats (dict): Statistics collected during validation.
         confusion_matrix: Confusion matrix for classification evaluation.
         nc (int): Number of classes.
-        iouv (torch.Tensor): IoU thresholds from 0.50 to 0.95 in spaces of 0.05.
+        iouv (torch.Tensor): IoU thresholds from 0.50 to 0.95 in steps of 0.05.
         jdict (list): List to store JSON validation results.
-        speed (dict): Dictionary with keys 'preprocess', 'inference', 'loss', 'postprocess' and their respective
-            batch processing times in milliseconds.
+        speed (dict): Dictionary with keys 'preprocess', 'inference', 'loss', 'postprocess' and their respective batch
+            processing times in milliseconds.
         save_dir (Path): Directory to save results.
         plots (dict): Dictionary to store plots for visualization.
         callbacks (dict): Dictionary to store various callback functions.
+        stride (int): Model stride for padding calculations.
+        loss (torch.Tensor): Accumulated loss during training validation.
 
     Methods:
         __call__: Execute validation process, running inference on dataloader and computing performance metrics.
@@ -87,30 +82,28 @@ class BaseValidator:
         update_metrics: Update metrics based on predictions and batch.
         finalize_metrics: Finalize and return all metrics.
         get_stats: Return statistics about the model's performance.
-        check_stats: Check statistics.
         print_results: Print the results of the model's predictions.
         get_desc: Get description of the YOLO model.
-        on_plot: Register plots (e.g. to be consumed in callbacks).
+        on_plot: Register plots for visualization.
         plot_val_samples: Plot validation samples during training.
         plot_predictions: Plot YOLO model predictions on batch images.
         pred_to_json: Convert predictions to JSON format.
         eval_json: Evaluate and return JSON format of prediction statistics.
     """
 
-    def __init__(self, dataloader=None, save_dir=None, pbar=None, args=None, _callbacks=None):
-        """
-        Initialize a BaseValidator instance.
+    def __init__(self, dataloader=None, save_dir=None, args=None, _callbacks=None):
+        """Initialize a BaseValidator instance.
 
         Args:
-            dataloader (torch.utils.data.DataLoader, optional): Dataloader to be used for validation.
+            dataloader (torch.utils.data.DataLoader, optional): DataLoader to be used for validation.
             save_dir (Path, optional): Directory to save results.
-            pbar (tqdm.tqdm, optional): Progress bar for displaying progress.
             args (SimpleNamespace, optional): Configuration for the validator.
             _callbacks (dict, optional): Dictionary to store various callback functions.
         """
+        import torchvision  # noqa (import here so torchvision import time not recorded in postprocess time)
+
         self.args = get_cfg(overrides=args)
         self.dataloader = dataloader
-        self.pbar = pbar
         self.stride = None
         self.data = None
         self.device = None
@@ -123,176 +116,135 @@ class BaseValidator:
         self.nc = None
         self.iouv = None
         self.jdict = None
+        self.distributed_validation = False
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
 
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
         if self.args.conf is None:
-            self.args.conf = 0.001  # default conf=0.001
+            self.args.conf = 0.01 if self.args.task == "obb" else 0.001  # reduce OBB val memory usage
         self.args.imgsz = check_imgsz(self.args.imgsz, max_dim=1)
 
         self.plots = {}
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
 
     @staticmethod
-    def _get_detection_head(model):
-        """Resolve the terminal Detect/Segment head from raw, wrapped, or exported YOLO models."""
-        base_model = de_parallel(model)
-        model_roots = [getattr(base_model, "model", None)]
-
-        nested_model = getattr(model_roots[0], "model", None) if model_roots[0] is not None else None
-        if nested_model is not None:
-            model_roots.append(nested_model)
-
-        for root in model_roots:
-            if root is None:
-                continue
-            try:
-                head = root[-1]
-            except Exception:
-                continue
-            if isinstance(head, (Detect, Segment)):
-                return head
-
-        raise TypeError(f"Unsupported detection head type for validation: {type(model)}")
+    def _get_trainer_pt2e_model(trainer):
+        """Return the highest-priority PT2E model attached to the trainer."""
+        model = (
+            getattr(trainer, "export_model_eval", None)
+            or getattr(trainer, "qat_model", None)
+            or getattr(trainer, "export_model", None)
+        )
+        return unwrap_model(model) if model is not None else None
 
     @staticmethod
-    def _resolve_device(device, batch=1):
-        """Resolve user input to a concrete torch.device without remapping to cuda:0."""
-        if isinstance(device, torch.device):
-            return device
+    def _prepare_pt2e_model_for_eval(model):
+        """Switch exported PT2E models to eval without relying on eager `.eval()` semantics."""
+        try:
+            torch.ao.quantization.allow_exported_model_train_eval(model)
+        except Exception:
+            pass
 
-        if isinstance(device, (list, tuple)):
-            if not device:
-                device = 0 if torch.cuda.is_available() else "cpu"
-            else:
-                device = device[0]
-
-        if device is None:
-            device = 0 if torch.cuda.is_available() else "cpu"
-
-        if isinstance(device, int):
-            if device < 0:
-                return torch.device("cpu")
-            if not torch.cuda.is_available():
-                raise ValueError(f"device={device} requires CUDA, but CUDA is not available.")
-            return torch.device(f"cuda:{device}")
-
-        device_str = str(device).strip().lower()
-        if device_str in {"cpu", "mps"}:
-            return torch.device(device_str)
-        if device_str.startswith("cuda:"):
-            if not torch.cuda.is_available():
-                raise ValueError(f"device={device} requires CUDA, but CUDA is not available.")
-            return torch.device(device_str)
-        if device_str.isdigit():
-            if not torch.cuda.is_available():
-                raise ValueError(f"device={device} requires CUDA, but CUDA is not available.")
-            return torch.device(f"cuda:{device_str}")
-        if "," in device_str:
-            first = device_str.split(",")[0].strip()
-            if first.isdigit():
-                if not torch.cuda.is_available():
-                    raise ValueError(f"device={device} requires CUDA, but CUDA is not available.")
-                return torch.device(f"cuda:{first}")
-            if first.startswith("cuda:"):
-                if not torch.cuda.is_available():
-                    raise ValueError(f"device={device} requires CUDA, but CUDA is not available.")
-                return torch.device(first)
-
-        # Fallback for uncommon formats.
-        return select_device(device, batch=batch, verbose=False)
+        try:
+            torch.ao.quantization.move_exported_model_to_eval(model)
+        except Exception:
+            model.eval()
+        else:
+            model.eval()
+        return model
 
     @staticmethod
-    def _load_qat_checkpoint(ckpt_path, device):
-        """Load a QAT checkpoint once to avoid repeated large deserialization."""
-        return torch.load(ckpt_path, map_location=device, weights_only=False)
+    def _rebuild_pt2e_predictions(raw_preds, reference_model):
+        """Convert exported/PT2E training-graph outputs to validator-compatible inference outputs."""
+        if not isinstance(raw_preds, dict):
+            return raw_preds, raw_preds
+
+        head = unwrap_model(reference_model).model[-1]
+        if getattr(head, "end2end", False) and "one2one" in raw_preds:
+            pred_dict = raw_preds["one2one"]
+        elif "one2many" in raw_preds:
+            pred_dict = raw_preds["one2many"]
+        else:
+            pred_dict = raw_preds
+
+        # Handle per-scale list format from concat_flag=False forward_head
+        boxes = pred_dict.get("boxes", None)
+        if isinstance(boxes, list):
+            pred_dict["boxes"] = torch.cat(boxes, dim=-1)
+            pred_dict["scores"] = torch.cat(pred_dict["scores"], dim=-1)
+
+        inference = head._inference(pred_dict)
+        if getattr(head, "end2end", False):
+            inference = head.postprocess(inference.permute(0, 2, 1))
+
+        if "proto" in pred_dict:
+            proto = pred_dict["proto"]
+            inference_proto = proto[0] if isinstance(proto, tuple) else proto
+            return ((inference, inference_proto), raw_preds), raw_preds
+        return (inference, raw_preds), raw_preds
 
     @smart_inference_mode()
     def __call__(self, trainer=None, model=None):
-        """
-        Execute validation process, running inference on dataloader and computing performance metrics.
+        """Execute validation process, running inference on dataloader and computing performance metrics.
 
         Args:
             trainer (object, optional): Trainer object that contains the model to validate.
             model (nn.Module, optional): Model to validate if not using a trainer.
 
         Returns:
-            stats (dict): Dictionary containing validation statistics.
+            (dict): Dictionary containing validation statistics.
         """
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
-        qat_model = None
+        pt2e_model = None
+        loss_model = None
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
-            # Force FP16 val during training
-            self.args.half = self.device.type != "cpu" and trainer.amp
-            qat_model = getattr(trainer, "qat_model", None)
-            model = trainer.ema.ema or trainer.model
-            model = model.half() if self.args.half else model.float()
- 
+            self.distributed_validation = trainer.world_size > 1
+            pt2e_model = self._get_trainer_pt2e_model(trainer)
+            loss_model = unwrap_model(trainer.model)
+            if pt2e_model is not None and self.args.end2end is not None:
+                if hasattr(loss_model.model[-1], "end2end"):
+                    loss_model.model[-1].end2end = self.args.end2end
+            # Exported PT2E graphs are validated in FP32.
+            self.args.half = self.device.type != "cpu" and trainer.amp and pt2e_model is None
+            model = pt2e_model or trainer.ema.ema or trainer.model
+            if pt2e_model is None and trainer.args.compile and hasattr(model, "_orig_mod"):
+                model = model._orig_mod  # validate non-compiled original model to avoid issues
+            if pt2e_model is not None:
+                model = self._prepare_pt2e_model_for_eval(model.float())
+            else:
+                model = model.half() if self.args.half else model.float()
+                model.eval()
             self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
-            model.eval()
-            qat_model.eval()
         else:
-            from ultralytics.nn.tasks import DetectionModel
-            from ultralytics.utils import LOGGER, RANK
-            from torch.ao.quantization.quantize_pt2e import prepare_qat_pt2e, convert_pt2e
-            self.device = self._resolve_device(self.args.get("device", 0), batch=self.args.batch)
-            float_model = DetectionModel(model.yaml, nc=model.yaml['nc'], verbose=True and RANK == -1)
-            float_model.load(model)
-            # quantizer
-            config_path = "./config.json"
-            quantizer = AXQuantizer(config_path)
-            # float_model.train()
-            float_model = float_model.to(self.device)
-            inp_h, inp_w = self.args.get('qat_onnx_imgsz', [640, 640])
-
-            inputs = torch.rand(2, 3, inp_h, inp_w).to(self.device)
-            print(f'export input shape: {inputs.shape}')
-            dynamic_shapes = {
-                "x":{0: torch.export.Dim.AUTO, 2: torch.export.Dim.AUTO, 3: torch.export.Dim.AUTO} 
-            }
-            exported_model = torch.export.export_for_training(float_model, (inputs,), dynamic_shapes=dynamic_shapes).module() 
-            prepared_model = prepare_qat_pt2e(exported_model, quantizer)
-            prepared_model.to(self.device)
-
-            ckpt = self._load_qat_checkpoint(self.args.qat_pt_path, self.device)
-            prepared_model.load_state_dict(ckpt["qat_model"])
-            qat_model = convert_pt2e(prepared_model)
-            torch.ao.quantization.move_exported_model_to_eval(qat_model)
-            torch.ao.quantization.allow_exported_model_train_eval(qat_model)
-            qat_model.eval()
-            qat_model.to(self.device)
- 
-            # print(f'self.args {self.args}')
-
             if str(self.args.model).endswith(".yaml") and model is None:
-                LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
+                LOGGER.warning("validating an untrained model YAML will result in 0 mAP.")
             callbacks.add_integration_callbacks(self)
+            if hasattr(model, "end2end"):
+                if self.args.end2end is not None:
+                    model.end2end = self.args.end2end
+                if model.end2end:
+                    model.set_head_attr(max_det=self.args.max_det, agnostic_nms=self.args.agnostic_nms)
             model = AutoBackend(
-                weights=model or self.args.model,
-                # device=select_device(self.args.device, self.args.batch),
-                device=self.device,
+                model=model or self.args.model,
+                device=select_device(self.args.device) if RANK == -1 else torch.device("cuda", RANK),
                 dnn=self.args.dnn,
                 data=self.args.data,
                 fp16=self.args.half,
             )
-            # self.model = model
             self.device = model.device  # update device
             self.args.half = model.fp16  # update half
-            stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+            stride, pt, jit = model.stride, model.pt, model.jit
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
-            if engine:
-                self.args.batch = model.batch_size
-            elif not pt and not jit:
+            if not (pt or jit or getattr(model, "dynamic", False)):
                 self.args.batch = model.metadata.get("batch", 1)  # export.py models default to batch-size 1
                 LOGGER.info(f"Setting batch={self.args.batch} input of shape ({self.args.batch}, 3, {imgsz}, {imgsz})")
-            
-            print(f'autobackend self.device {self.device}')
-            if str(self.args.data).split(".")[-1] in {"yaml", "yml"}:
+
+            if str(self.args.data).rsplit(".", 1)[-1] in {"yaml", "yml"}:
                 self.data = check_det_dataset(self.args.data)
             elif self.args.task == "classify":
                 self.data = check_cls_dataset(self.args.data, split=self.args.split)
@@ -301,12 +253,15 @@ class BaseValidator:
 
             if self.device.type in {"cpu", "mps"}:
                 self.args.workers = 0  # faster CPU val as time dominated by inference, not dataloading
-            if not pt:
+            if not (pt or (getattr(model, "dynamic", False) and not model.imx)):
                 self.args.rect = False
             self.stride = model.stride  # used in get_dataloader() for padding
             self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
-            # model.eval()
-            model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
+
+            model.eval()
+            if self.args.compile:
+                model = attempt_compile(model, device=self.device)
+            model.warmup(imgsz=(1 if pt else self.args.batch, self.data["channels"], imgsz, imgsz))  # warmup
 
         self.run_callbacks("on_val_start")
         dt = (
@@ -316,17 +271,8 @@ class BaseValidator:
             Profile(device=self.device),
         )
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
-        self.init_metrics(de_parallel(model))
+        self.init_metrics(loss_model if pt2e_model is not None else unwrap_model(model))
         self.jdict = []  # empty before each val
-
-        # det_head = self._get_detection_head(model if self.training else model.model)
-        if self.training:
-            det_id = list(model.model._modules.keys())[-1]
-            det_head = model.model._modules.get(det_id)
-        else:
-            det_id = list(model.model.model._modules.keys())[-1]
-            det_head = model.model.model._modules.get(det_id)
-
         for batch_i, batch in enumerate(bar):
             self.run_callbacks("on_val_batch_start")
             self.batch_i = batch_i
@@ -336,61 +282,55 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                if qat_model is None:
-                    preds = model(batch["img"])
+                if pt2e_model is not None:
+                    raw_preds = model(batch["img"])
+                    preds, loss_preds = self._rebuild_pt2e_predictions(raw_preds, loss_model)
                 else:
-                    qat_model.eval()
-                    qat_preds = qat_model(batch['img'])
-
-                    if isinstance(det_head, Segment):
-                        backbone_out = qat_preds[0]
-                    elif isinstance(det_head, Detect):
-                        backbone_out = qat_preds
-                    else:
-                        raise TypeError(f"Unsupported detection head type for QAT validation: {type(det_head)}")
-
-                    if isinstance(backbone_out, dict):
-                        max_det = getattr(self.args, "max_det", 300)
-                        nc = getattr(det_head, "nc", self.data.get("nc", 80) if hasattr(self, "data") else 80)
-                        qat_preds_infer = det_head._inference(backbone_out['one2one'])
-                        qat_preds_infer = det_head.postprocess(qat_preds_infer.permute(0, 2, 1), max_det, nc)
-                    else:
-                        qat_preds_infer = det_head._inference(backbone_out)
-
-                    if isinstance(det_head, Segment):
-                        x = (qat_preds_infer, backbone_out)
-                        mc = qat_preds[1]
-                        p = qat_preds[2]
-                        preds = (torch.cat([x[0], mc], 1), (x[1], mc, p))
-                    elif isinstance(det_head, Detect):
-                        preds = (qat_preds_infer, qat_preds)
+                    preds = model(batch["img"], augment=augment)
+                    loss_preds = preds
 
             # Loss
             with dt[2]:
                 if self.training:
-                    self.loss += model.loss(batch, preds)[1]
+                    if pt2e_model is not None:
+                        self.loss += loss_model.loss(batch, loss_preds)[1]
+                    else:
+                        self.loss += model.loss(batch, preds)[1]
 
             # Postprocess
             with dt[3]:
                 preds = self.postprocess(preds)
 
             self.update_metrics(preds, batch)
-            if self.args.plots and batch_i < 3:
+            if self.args.plots and batch_i < 3 and RANK in {-1, 0}:
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks("on_val_batch_end")
-        stats = self.get_stats()
-        self.check_stats(stats)
-        self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
-        self.finalize_metrics()
-        self.print_results()
-        self.run_callbacks("on_val_end")
+
+        stats = {}
+        self.gather_stats()
+        if RANK in {-1, 0}:
+            stats = self.get_stats()
+            self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
+            self.finalize_metrics()
+            self.print_results()
+            self.run_callbacks("on_val_end")
+
         if self.training:
-            model.float()
-            results = {**stats, **trainer.label_loss_items(self.loss.cpu() / len(self.dataloader), prefix="val")}
+            if pt2e_model is None:
+                model.float()
+            # Reduce loss across all GPUs
+            loss = self.loss.clone().detach()
+            if trainer.world_size > 1:
+                dist.reduce(loss, dst=0, op=dist.ReduceOp.AVG)
+            if RANK > 0:
+                return
+            results = {**stats, **trainer.label_loss_items(loss.cpu() / len(self.dataloader), prefix="val")}
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
+            if RANK > 0:
+                return stats
             LOGGER.info(
                 "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
                     *tuple(self.speed.values())
@@ -408,14 +348,13 @@ class BaseValidator:
     def match_predictions(
         self, pred_classes: torch.Tensor, true_classes: torch.Tensor, iou: torch.Tensor, use_scipy: bool = False
     ) -> torch.Tensor:
-        """
-        Match predictions to ground truth objects using IoU.
+        """Match predictions to ground truth objects using IoU.
 
         Args:
             pred_classes (torch.Tensor): Predicted class indices of shape (N,).
             true_classes (torch.Tensor): Target class indices of shape (M,).
             iou (torch.Tensor): An NxM tensor containing the pairwise IoU values for predictions and ground truth.
-            use_scipy (bool): Whether to use scipy for matching (more precise).
+            use_scipy (bool, optional): Whether to use scipy for matching (more precise).
 
         Returns:
             (torch.Tensor): Correct tensor of shape (N, 10) for 10 IoU thresholds.
@@ -428,12 +367,11 @@ class BaseValidator:
         iou = iou.cpu().numpy()
         for i, threshold in enumerate(self.iouv.cpu().tolist()):
             if use_scipy:
-                # WARNING: known issue that reduces mAP in https://github.com/ultralytics/ultralytics/pull/4708
                 import scipy  # scope import to avoid importing for all commands
 
                 cost_matrix = iou * (iou >= threshold)
                 if cost_matrix.any():
-                    labels_idx, detections_idx = scipy.optimize.linear_sum_assignment(cost_matrix)
+                    labels_idx, detections_idx = scipy.optimize.linear_sum_assignment(cost_matrix, maximize=True)
                     valid = cost_matrix[labels_idx, detections_idx] > 0
                     if valid.any():
                         correct[detections_idx[valid], i] = True
@@ -444,7 +382,6 @@ class BaseValidator:
                     if matches.shape[0] > 1:
                         matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
                         matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                        # matches = matches[matches[:, 2].argsort()[::-1]]
                         matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
                     correct[matches[:, 1].astype(int), i] = True
         return torch.tensor(correct, dtype=torch.bool, device=pred_classes.device)
@@ -476,31 +413,25 @@ class BaseValidator:
 
     def init_metrics(self, model):
         """Initialize performance metrics for the YOLO model."""
-        pass
 
     def update_metrics(self, preds, batch):
         """Update metrics based on predictions and batch."""
-        pass
 
-    def finalize_metrics(self, *args, **kwargs):
+    def finalize_metrics(self):
         """Finalize and return all metrics."""
-        pass
 
     def get_stats(self):
         """Return statistics about the model's performance."""
         return {}
 
-    def check_stats(self, stats):
-        """Check statistics."""
-        pass
+    def gather_stats(self):
+        """Gather statistics from all the GPUs during DDP training to GPU 0."""
 
     def print_results(self):
         """Print the results of the model's predictions."""
-        pass
 
     def get_desc(self):
         """Get description of the YOLO model."""
-        pass
 
     @property
     def metric_keys(self):
@@ -508,22 +439,20 @@ class BaseValidator:
         return []
 
     def on_plot(self, name, data=None):
-        """Register plots (e.g. to be consumed in callbacks)."""
+        """Register plots for visualization, deduplicating by type."""
+        plot_type = data.get("type") if data else None
+        if plot_type and any((v.get("data") or {}).get("type") == plot_type for v in self.plots.values()):
+            return  # Skip duplicate plot types
         self.plots[Path(name)] = {"data": data, "timestamp": time.time()}
 
-    # TODO: may need to put these following functions into callback
     def plot_val_samples(self, batch, ni):
         """Plot validation samples during training."""
-        pass
 
     def plot_predictions(self, batch, preds, ni):
         """Plot YOLO model predictions on batch images."""
-        pass
 
     def pred_to_json(self, preds, batch):
         """Convert predictions to JSON format."""
-        pass
 
     def eval_json(self, stats):
         """Evaluate and return JSON format of prediction statistics."""
-        pass

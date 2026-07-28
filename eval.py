@@ -1,31 +1,62 @@
-from ultralytics import YOLO
+#!/usr/bin/env python3
+"""Unified evaluation entrypoint for float, QAT, converted, ONNX, segmentation, and PTQ models."""
 
-# Load a model
-model = YOLO("yolo11n.yaml")
-model.load("yolo11n.pt")  # build from YAML and transfer weights
+from __future__ import annotations
 
-# Validate the model
-metrics = model.val(data="coco.yaml",                                   # 数据集
-                    batch=32,
-                    qat_pt_path="./runs/detect/qat/weights/best.pt",    # 评估qat模型路径
-                    qat_onnx_imgsz=[640, 640],                          # 评估时的shape, [h, w]
-                    device=0,
-                    )
-metrics.box.map  # map50-95
-metrics.box.map50  # map50
-metrics.box.map75  # map75
-metrics.box.maps  # a list contains map50-95 of each category
+import importlib.util
+import sys
+from pathlib import Path
 
-# yolov11s官方精度
-# Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.466
-# Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.635
-# Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.503
-# Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.292
-# Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.511
-# Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.638
-# Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.362
-# Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.598
-# Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.651
-# Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.472
-# Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.709
-# Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.813
+BACKENDS = {
+    "float": "float.py",
+    "qat": "qat.py",
+    "convert": "convert.py",
+    "onnx": "onnx.py",
+    "segment": "segment.py",
+    "ptq": "ptq.py",
+    "onnx-one2many": "onnx_one2many.py",
+}
+
+
+def _print_help() -> None:
+    print(
+        "Usage: python eval.py <mode> [options]\n\n"
+        "Modes:\n"
+        "  float          Evaluate a float PyTorch model with YOLO.val\n"
+        "  qat            Evaluate a prepared QAT checkpoint with fake quantization\n"
+        "  convert        Evaluate a QAT checkpoint after convert_pt2e (real Q/DQ)\n"
+        "  onnx           Evaluate a six-output one2one QAT ONNX model with ORT\n"
+        "  segment        Evaluate a QAT segmentation checkpoint\n"
+        "  ptq            Calibrate, convert, and evaluate a PTQ model\n"
+        "  onnx-one2many  Evaluate a legacy one2many ONNX model with NMS\n\n"
+        "Run 'python eval.py <mode> --help' for mode-specific options."
+    )
+
+
+def main() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] in {"-h", "--help"}:
+        _print_help()
+        return
+
+    mode = sys.argv[1]
+    backend = BACKENDS.get(mode)
+    if backend is None:
+        choices = ", ".join(BACKENDS)
+        raise SystemExit(f"Unknown eval mode '{mode}'. Choose one of: {choices}")
+
+    entrypoint = Path(__file__).resolve().parent / "scripts" / "eval_backends" / backend
+    sys.argv = [f"eval.py {mode}", *sys.argv[2:]]
+    module_name = f"_eval_backend_{mode.replace('-', '_')}"
+    spec = importlib.util.spec_from_file_location(module_name, entrypoint)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"Unable to load eval backend: {entrypoint}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    backend_main = getattr(module, "main", None)
+    if backend_main is not None:
+        backend_main()
+
+
+if __name__ == "__main__":
+    main()

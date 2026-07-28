@@ -1,0 +1,4 @@
+interface:
+  display_name: "YOLO QAT Config Discovery"
+  short_description: "生成 QAT 节点配置并检查 FX/ONNX 结构"
+  default_prompt: "Use $yolo-qat-config-discovery to rediscover QAT nodes, regenerate the config, and validate the FX and exported ONNX quantization structure."

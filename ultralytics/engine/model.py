@@ -1,9 +1,11 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
+from __future__ import annotations
+
 import inspect
-import os
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -11,64 +13,28 @@ from PIL import Image
 
 from ultralytics.cfg import TASK2DATA, get_cfg, get_save_dir
 from ultralytics.engine.results import Results
-from ultralytics.hub import HUB_WEB_ROOT, HUBTrainingSession
-from ultralytics.nn.tasks import attempt_load_one_weight, guess_model_task, yaml_model_load
+from ultralytics.nn.tasks import guess_model_task, load_checkpoint, yaml_model_load
 from ultralytics.utils import (
     ARGV,
     ASSETS,
     DEFAULT_CFG_DICT,
+    LOCAL_RANK,
     LOGGER,
     RANK,
-    LOCAL_RANK,
     SETTINGS,
+    YAML,
     callbacks,
     checks,
-    emojis,
-    YAML,
 )
-
-import copy
-from torch.ao.quantization.quantizer.xnnpack_quantizer import (
-    XNNPACKQuantizer,
-    get_symmetric_quantization_config,
-)
-from torch.ao.quantization.quantize_pt2e import (
-    prepare_qat_pt2e,
-    convert_pt2e,
-)
-
-# from utils.quantizer import (
-#     AXQuantizer,
-#     get_quantization_config,
-# )
-from ultralytics.utils.ax_quantizer import AXQuantizer
-from ultralytics.utils.train_utils import (
-    load_model,
-    train_one_epoch,
-    imagenet_data_loaders,
-    dynamo_export,
-    onnx_simplify,
-    evaluate,
-)
-from ultralytics.utils.quant_utils import simplify_and_fix_4bit_dtype
-import ultralytics.utils.quantized_decomposed_dequantize_per_channel
-
-from torch.quantization.fake_quantize import FakeQuantizeBase, _is_fake_quant_script_module
-from torch.ao.quantization._learnable_fake_quantize import _LearnableFakeQuantize 
-from torch.ao.quantization import HistogramObserver,FakeQuantizeBase,_DerivedObserverOrFakeQuantize,disable_fake_quant, enable_fake_quant, disable_observer, enable_observer
-
-import onnx
-from onnxsim import simplify
-from onnxslim import slim
+from ultralytics.utils.qat_utils import prepare_pt2e_qat_model, resolve_qat_config_path
 
 
 class Model(torch.nn.Module):
-    """
-    A base class for implementing YOLO models, unifying APIs across different model types.
+    """A base class for implementing YOLO models, unifying APIs across different model types.
 
-    This class provides a common interface for various operations related to YOLO models, such as training,
-    validation, prediction, exporting, and benchmarking. It handles different types of models, including those
-    loaded from local files, Ultralytics HUB, or Triton Server.
+    This class provides a common interface for various operations related to YOLO models, such as training, validation,
+    prediction, exporting, and benchmarking. It handles different types of models, including those loaded from local
+    files, Ultralytics HUB, or Triton Server.
 
     Attributes:
         callbacks (dict): A dictionary of callback functions for various events during model operations.
@@ -79,36 +45,36 @@ class Model(torch.nn.Module):
         cfg (str): The configuration of the model if loaded from a *.yaml file.
         ckpt_path (str): The path to the checkpoint file.
         overrides (dict): A dictionary of overrides for model configuration.
-        metrics (dict): The latest training/validation metrics.
+        metrics (ultralytics.utils.metrics.DetMetrics): The latest training/validation metrics.
         session (HUBTrainingSession): The Ultralytics HUB session, if applicable.
         task (str): The type of task the model is intended for.
         model_name (str): The name of the model.
 
     Methods:
         __call__: Alias for the predict method, enabling the model instance to be callable.
-        _new: Initializes a new model based on a configuration file.
-        _load: Loads a model from a checkpoint file.
-        _check_is_pytorch_model: Ensures that the model is a PyTorch model.
-        reset_weights: Resets the model's weights to their initial state.
-        load: Loads model weights from a specified file.
-        save: Saves the current state of the model to a file.
-        info: Logs or returns information about the model.
-        fuse: Fuses Conv2d and BatchNorm2d layers for optimized inference.
-        predict: Performs object detection predictions.
-        track: Performs object tracking.
-        val: Validates the model on a dataset.
-        benchmark: Benchmarks the model on various export formats.
-        export: Exports the model to different formats.
-        train: Trains the model on a dataset.
-        tune: Performs hyperparameter tuning.
-        _apply: Applies a function to the model's tensors.
-        add_callback: Adds a callback function for an event.
-        clear_callback: Clears all callbacks for an event.
-        reset_callbacks: Resets all callbacks to their default functions.
+        _new: Initialize a new model based on a configuration file.
+        _load: Load a model from a checkpoint file.
+        _check_is_pytorch_model: Ensure that the model is a PyTorch model.
+        reset_weights: Reset the model's weights to their initial state.
+        load: Load model weights from a specified file.
+        save: Save the current state of the model to a file.
+        info: Log or return information about the model.
+        fuse: Fuse Conv2d and BatchNorm2d layers for optimized inference.
+        predict: Perform predictions on given image sources.
+        track: Perform object tracking.
+        val: Validate the model on a dataset.
+        benchmark: Benchmark the model on various export formats.
+        export: Export the model to different formats.
+        train: Train the model on a dataset.
+        tune: Perform hyperparameter tuning.
+        _apply: Apply a function to the model's tensors.
+        add_callback: Add a callback function for an event.
+        clear_callback: Clear all callbacks for an event.
+        reset_callbacks: Reset all callbacks to their default functions.
 
     Examples:
         >>> from ultralytics import YOLO
-        >>> model = YOLO("yolo11n.pt")
+        >>> model = YOLO("yolo26n.pt")
         >>> results = model.predict("image.jpg")
         >>> model.train(data="coco8.yaml", epochs=3)
         >>> metrics = model.val()
@@ -117,35 +83,30 @@ class Model(torch.nn.Module):
 
     def __init__(
         self,
-        model: Union[str, Path] = "yolo11n.pt",
-        task: str = None,
+        model: str | Path | Model = "yolo26n.pt",
+        task: str | None = None,
         verbose: bool = False,
     ) -> None:
-        """
-        Initialize a new instance of the YOLO model class.
+        """Initialize a new instance of the YOLO model class.
 
-        This constructor sets up the model based on the provided model path or name. It handles various types of
-        model sources, including local files, Ultralytics HUB models, and Triton Server models. The method
-        initializes several important attributes of the model and prepares it for operations like training,
-        prediction, or export.
+        This constructor sets up the model based on the provided model path or name. It handles various types of model
+        sources, including local files, Ultralytics HUB models, and Triton Server models. The method initializes several
+        important attributes of the model and prepares it for operations like training, prediction, or export.
 
         Args:
-            model (str | Path): Path or name of the model to load or create. Can be a local file path, a
-                model name from Ultralytics HUB, or a Triton Server model.
-            task (str | None): The task type associated with the YOLO model, specifying its application domain.
-            verbose (bool): If True, enables verbose output during the model's initialization and subsequent
-                operations.
+            model (str | Path | Model): Path or name of the model to load or create. Can be a local file path, a model
+                name from Ultralytics HUB, a Triton Server model, or an already initialized Model instance.
+            task (str, optional): The specific task for the model. If None, it will be inferred from the config.
+            verbose (bool): If True, enables verbose output during the model's initialization and subsequent operations.
 
         Raises:
             FileNotFoundError: If the specified model file does not exist or is inaccessible.
             ValueError: If the model file or configuration is invalid or unsupported.
             ImportError: If required dependencies for specific model types (like HUB SDK) are not installed.
-
-        Examples:
-            >>> model = Model("yolo11n.pt")
-            >>> model = Model("path/to/model.yaml", task="detect")
-            >>> model = Model("hub_model", verbose=True)
         """
+        if isinstance(model, Model):
+            self.__dict__ = model.__dict__  # accepts an already initialized Model
+            return
         super().__init__()
         self.callbacks = callbacks.get_default_callbacks()
         self.predictor = None  # reuse predictor
@@ -163,6 +124,8 @@ class Model(torch.nn.Module):
 
         # Check if Ultralytics HUB model from https://hub.ultralytics.com
         if self.is_hub_model(model):
+            from ultralytics.hub import HUBTrainingSession
+
             # Fetch model from HUB
             checks.check_requirements("hub-sdk>=0.0.12")
             session = HUBTrainingSession.create_session(model)
@@ -178,7 +141,7 @@ class Model(torch.nn.Module):
 
         # Load or create new YOLO model
         __import__("os").environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # to avoid deterministic warnings
-        if Path(model).suffix in {".yaml", ".yml"}:
+        if str(model).endswith((".yaml", ".yml")):
             self._new(model, task=task, verbose=verbose)
         else:
             self._load(model, task=task)
@@ -188,43 +151,40 @@ class Model(torch.nn.Module):
 
     def __call__(
         self,
-        source: Union[str, Path, int, Image.Image, list, tuple, np.ndarray, torch.Tensor] = None,
-        onnxpath:str=None,
+        source: str | Path | int | Image.Image | list | tuple | np.ndarray | torch.Tensor = None,
         stream: bool = False,
         **kwargs: Any,
     ) -> list:
-        """
-        Alias for the predict method, enabling the model instance to be callable for predictions.
+        """Alias for the predict method, enabling the model instance to be callable for predictions.
 
-        This method simplifies the process of making predictions by allowing the model instance to be called
-        directly with the required arguments.
+        This method simplifies the process of making predictions by allowing the model instance to be called directly
+        with the required arguments.
 
         Args:
-            source (str | Path | int | PIL.Image | np.ndarray | torch.Tensor | List | Tuple): The source of
-                the image(s) to make predictions on. Can be a file path, URL, PIL image, numpy array, PyTorch
-                tensor, or a list/tuple of these.
+            source (str | Path | int | PIL.Image | np.ndarray | torch.Tensor | list | tuple): The source of the image(s)
+                to make predictions on. Can be a file path, URL, PIL image, numpy array, PyTorch tensor, or a list/tuple
+                of these.
             stream (bool): If True, treat the input source as a continuous stream for predictions.
             **kwargs (Any): Additional keyword arguments to configure the prediction process.
 
         Returns:
-            (List[ultralytics.engine.results.Results]): A list of prediction results, each encapsulated in a
-                Results object.
+            (list[ultralytics.engine.results.Results]): A list of prediction results, each encapsulated in a Results
+                object.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model("https://ultralytics.com/images/bus.jpg")
             >>> for r in results:
             ...     print(f"Detected {len(r)} objects in image")
         """
-        return self.predict(source, stream, onnxpath, **kwargs)
+        return self.predict(source, stream, **kwargs)
 
     @staticmethod
     def is_triton_model(model: str) -> bool:
-        """
-        Check if the given model string is a Triton Server URL.
+        """Check if the given model string is a Triton Server URL.
 
-        This static method determines whether the provided model string represents a valid Triton Server URL by
-        parsing its components using urllib.parse.urlsplit().
+        This static method determines whether the provided model string represents a valid Triton Server URL by parsing
+        its components using urllib.parse.urlsplit().
 
         Args:
             model (str): The model string to be checked.
@@ -235,7 +195,7 @@ class Model(torch.nn.Module):
         Examples:
             >>> Model.is_triton_model("http://localhost:8000/v2/models/yolo11n")
             True
-            >>> Model.is_triton_model("yolo11n.pt")
+            >>> Model.is_triton_model("yolo26n.pt")
             False
         """
         from urllib.parse import urlsplit
@@ -245,8 +205,7 @@ class Model(torch.nn.Module):
 
     @staticmethod
     def is_hub_model(model: str) -> bool:
-        """
-        Check if the provided model is an Ultralytics HUB model.
+        """Check if the provided model is an Ultralytics HUB model.
 
         This static method determines whether the given model string represents a valid Ultralytics HUB model
         identifier.
@@ -260,23 +219,24 @@ class Model(torch.nn.Module):
         Examples:
             >>> Model.is_hub_model("https://hub.ultralytics.com/models/MODEL")
             True
-            >>> Model.is_hub_model("yolo11n.pt")
+            >>> Model.is_hub_model("yolo26n.pt")
             False
         """
+        from ultralytics.hub import HUB_WEB_ROOT
+
         return model.startswith(f"{HUB_WEB_ROOT}/models/")
 
     def _new(self, cfg: str, task=None, model=None, verbose=False) -> None:
-        """
-        Initialize a new model and infer the task type from model definitions.
+        """Initialize a new model and infer the task type from model definitions.
 
-        Creates a new model instance based on the provided configuration file. Loads the model configuration, infers
-        the task type if not specified, and initializes the model using the appropriate class from the task map.
+        Creates a new model instance based on the provided configuration file. Loads the model configuration, infers the
+        task type if not specified, and initializes the model using the appropriate class from the task map.
 
         Args:
             cfg (str): Path to the model configuration file in YAML format.
-            task (str | None): The specific task for the model. If None, it will be inferred from the config.
-            model (torch.nn.Module | None): A custom model instance. If provided, it will be used instead of creating
-                a new one.
+            task (str, optional): The specific task for the model. If None, it will be inferred from the config.
+            model (type[torch.nn.Module], optional): A custom model class. If provided, it will be used instead of the
+                default model class from the task map.
             verbose (bool): If True, displays model information during loading.
 
         Raises:
@@ -285,7 +245,7 @@ class Model(torch.nn.Module):
 
         Examples:
             >>> model = Model()
-            >>> model._new("yolo11n.yaml", task="detect", verbose=True)
+            >>> model._new("yolo26n.yaml", task="detect", verbose=True)
         """
         cfg_dict = yaml_model_load(cfg)
         self.cfg = cfg
@@ -300,15 +260,14 @@ class Model(torch.nn.Module):
         self.model_name = cfg
 
     def _load(self, weights: str, task=None) -> None:
-        """
-        Load a model from a checkpoint file or initialize it from a weights file.
+        """Load a model from a checkpoint file or initialize it from a weights file.
 
-        This method handles loading models from either .pt checkpoint files or other weight file formats. It sets
-        up the model, task, and related attributes based on the loaded weights.
+        This method handles loading models from either .pt checkpoint files or other weight file formats. It sets up the
+        model, task, and related attributes based on the loaded weights.
 
         Args:
             weights (str): Path to the model weights file to be loaded.
-            task (str | None): The task associated with the model. If None, it will be inferred from the model.
+            task (str, optional): The task associated with the model. If None, it will be inferred from the model.
 
         Raises:
             FileNotFoundError: If the specified weights file does not exist or is inaccessible.
@@ -316,16 +275,16 @@ class Model(torch.nn.Module):
 
         Examples:
             >>> model = Model()
-            >>> model._load("yolo11n.pt")
+            >>> model._load("yolo26n.pt")
             >>> model._load("path/to/weights.pth", task="detect")
         """
-        if weights.lower().startswith(("https://", "http://", "rtsp://", "rtmp://", "tcp://")):
+        if weights.lower().startswith(("https://", "http://", "rtsp://", "rtmp://", "tcp://", "ul://")):
             weights = checks.check_file(weights, download_dir=SETTINGS["weights_dir"])  # download and return local file
-        weights = checks.check_model_file_from_stem(weights)  # add suffix, i.e. yolo11n -> yolo11n.pt
+        weights = checks.check_model_file_from_stem(weights)  # add suffix, i.e. yolo26 -> yolo26n.pt
 
-        if Path(weights).suffix == ".pt":
-            self.model, self.ckpt = attempt_load_one_weight(weights)
-            self.task = self.model.args["task"]
+        if str(weights).rpartition(".")[-1] == "pt":
+            self.model, self.ckpt = load_checkpoint(weights)
+            self.task = self.model.task
             self.overrides = self.model.args = self._reset_ckpt_args(self.model.args)
             self.ckpt_path = self.model.pt_path
         else:
@@ -338,49 +297,47 @@ class Model(torch.nn.Module):
         self.model_name = weights
 
     def _check_is_pytorch_model(self) -> None:
-        """
-        Check if the model is a PyTorch model and raise TypeError if it's not.
+        """Check if the model is a PyTorch model and raise TypeError if it's not.
 
-        This method verifies that the model is either a PyTorch module or a .pt file. It's used to ensure that
-        certain operations that require a PyTorch model are only performed on compatible model types.
+        This method verifies that the model is either a PyTorch module or a .pt file. It's used to ensure that certain
+        operations that require a PyTorch model are only performed on compatible model types.
 
         Raises:
             TypeError: If the model is not a PyTorch module or a .pt file. The error message provides detailed
                 information about supported model formats and operations.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
+            >>> model = Model("yolo26n.pt")
             >>> model._check_is_pytorch_model()  # No error raised
-            >>> model = Model("yolo11n.onnx")
+            >>> model = Model("yolo26n.onnx")
             >>> model._check_is_pytorch_model()  # Raises TypeError
         """
-        pt_str = isinstance(self.model, (str, Path)) and Path(self.model).suffix == ".pt"
+        pt_str = isinstance(self.model, (str, Path)) and str(self.model).rpartition(".")[-1] == "pt"
         pt_module = isinstance(self.model, torch.nn.Module)
         if not (pt_module or pt_str):
             raise TypeError(
                 f"model='{self.model}' should be a *.pt PyTorch model to run this method, but is a different format. "
                 f"PyTorch models can train, val, predict and export, i.e. 'model.train(data=...)', but exported "
                 f"formats like ONNX, TensorRT etc. only support 'predict' and 'val' modes, "
-                f"i.e. 'yolo predict model=yolo11n.onnx'.\nTo run CUDA or MPS inference please pass the device "
+                f"i.e. 'yolo predict model=yolo26n.onnx'.\nTo run CUDA or MPS inference please pass the device "
                 f"argument directly in your inference command, i.e. 'model.predict(source=..., device=0)'"
             )
 
-    def reset_weights(self) -> "Model":
-        """
-        Reset the model's weights to their initial state.
+    def reset_weights(self) -> Model:
+        """Reset the model's weights to their initial state.
 
         This method iterates through all modules in the model and resets their parameters if they have a
-        'reset_parameters' method. It also ensures that all parameters have 'requires_grad' set to True,
-        enabling them to be updated during training.
+        'reset_parameters' method. It also ensures that all parameters have 'requires_grad' set to True, enabling them
+        to be updated during training.
 
         Returns:
             (Model): The instance of the class with reset weights.
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
+            >>> model = Model("yolo26n.pt")
             >>> model.reset_weights()
         """
         self._check_is_pytorch_model()
@@ -391,49 +348,47 @@ class Model(torch.nn.Module):
             p.requires_grad = True
         return self
 
-    def load(self, weights: Union[str, Path] = "yolo11n.pt") -> "Model":
-        """
-        Load parameters from the specified weights file into the model.
+    def load(self, weights: str | Path = "yolo26n.pt") -> Model:
+        """Load parameters from the specified weights file into the model.
 
         This method supports loading weights from a file or directly from a weights object. It matches parameters by
         name and shape and transfers them to the model.
 
         Args:
-            weights (Union[str, Path]): Path to the weights file or a weights object.
+            weights (str | Path): Path to the weights file or a weights object.
 
         Returns:
             (Model): The instance of the class with loaded weights.
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
 
         Examples:
             >>> model = Model()
-            >>> model.load("yolo11n.pt")
+            >>> model.load("yolo26n.pt")
             >>> model.load(Path("path/to/weights.pt"))
         """
         self._check_is_pytorch_model()
         if isinstance(weights, (str, Path)):
             self.overrides["pretrained"] = weights  # remember the weights for DDP training
-            weights, self.ckpt = attempt_load_one_weight(weights)
+            weights, self.ckpt = load_checkpoint(weights)
         self.model.load(weights)
         return self
 
-    def save(self, filename: Union[str, Path] = "saved_model.pt") -> None:
-        """
-        Save the current model state to a file.
+    def save(self, filename: str | Path = "saved_model.pt") -> None:
+        """Save the current model state to a file.
 
-        This method exports the model's checkpoint (ckpt) to the specified filename. It includes metadata such as
-        the date, Ultralytics version, license information, and a link to the documentation.
+        This method exports the model's checkpoint (ckpt) to the specified filename. It includes metadata such as the
+        date, Ultralytics version, license information, and a link to the documentation.
 
         Args:
             filename (str | Path): The name of the file to save the model to.
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
+            >>> model = Model("yolo26n.pt")
             >>> model.save("my_model.pt")
         """
         self._check_is_pytorch_model()
@@ -451,43 +406,42 @@ class Model(torch.nn.Module):
         }
         torch.save({**self.ckpt, **updates}, filename)
 
-    def info(self, detailed: bool = False, verbose: bool = True):
-        """
-        Display model information.
+    def info(self, detailed: bool = False, verbose: bool = True, imgsz: int | list[int, int] = 640):
+        """Display model information.
 
         This method provides an overview or detailed information about the model, depending on the arguments
-        passed. It can control the verbosity of the output and return the information as a list.
+        passed. It can control the verbosity of the output.
 
         Args:
             detailed (bool): If True, shows detailed information about the model layers and parameters.
-            verbose (bool): If True, prints the information. If False, returns the information as a list.
+            verbose (bool): If True, prints the information and returns model summary. If False, returns None.
+            imgsz (int | list[int, int]): Input image size used for FLOPs calculation.
 
         Returns:
-            (List[str]): A list of strings containing various types of information about the model, including
-                model summary, layer details, and parameter counts. Empty if verbose is True.
+            (tuple): A tuple containing the number of layers (int), number of parameters (int), number of gradients
+                (int), and GFLOPs (float). Returns None if verbose is False.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
-            >>> model.info()  # Prints model summary
-            >>> info_list = model.info(detailed=True, verbose=False)  # Returns detailed info as a list
+            >>> model = Model("yolo26n.pt")
+            >>> model.info()  # Prints model summary and returns tuple
+            >>> model.info(detailed=True)  # Prints detailed info and returns tuple
         """
         self._check_is_pytorch_model()
-        return self.model.info(detailed=detailed, verbose=verbose)
+        return self.model.info(detailed=detailed, verbose=verbose, imgsz=imgsz)
 
     def fuse(self) -> None:
-        """
-        Fuse Conv2d and BatchNorm2d layers in the model for optimized inference.
+        """Fuse Conv2d and BatchNorm2d layers in the model for optimized inference.
 
-        This method iterates through the model's modules and fuses consecutive Conv2d and BatchNorm2d layers
-        into a single layer. This fusion can significantly improve inference speed by reducing the number of
-        operations and memory accesses required during forward passes.
+        This method iterates through the model's modules and fuses consecutive Conv2d and BatchNorm2d layers into a
+        single layer. This fusion can significantly improve inference speed by reducing the number of operations and
+        memory accesses required during forward passes.
 
         The fusion process typically involves folding the BatchNorm2d parameters (mean, variance, weight, and
         bias) into the preceding Conv2d layer's weights and biases. This results in a single Conv2d layer that
         performs both convolution and normalization in one step.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
+            >>> model = Model("yolo26n.pt")
             >>> model.fuse()
             >>> # Model is now fused and ready for optimized inference
         """
@@ -496,27 +450,26 @@ class Model(torch.nn.Module):
 
     def embed(
         self,
-        source: Union[str, Path, int, list, tuple, np.ndarray, torch.Tensor] = None,
+        source: str | Path | int | list | tuple | np.ndarray | torch.Tensor = None,
         stream: bool = False,
         **kwargs: Any,
     ) -> list:
-        """
-        Generate image embeddings based on the provided source.
+        """Generate image embeddings based on the provided source.
 
         This method is a wrapper around the 'predict()' method, focusing on generating embeddings from an image
         source. It allows customization of the embedding process through various keyword arguments.
 
         Args:
-            source (str | Path | int | List | Tuple | np.ndarray | torch.Tensor): The source of the image for
-                generating embeddings. Can be a file path, URL, PIL image, numpy array, etc.
+            source (str | Path | int | list | tuple | np.ndarray | torch.Tensor): The source of the image for generating
+                embeddings. Can be a file path, URL, numpy array, etc.
             stream (bool): If True, predictions are streamed.
             **kwargs (Any): Additional keyword arguments for configuring the embedding process.
 
         Returns:
-            (List[torch.Tensor]): A list containing the image embeddings.
+            (list[torch.Tensor]): A list containing the image embeddings.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> image = "https://ultralytics.com/images/bus.jpg"
             >>> embeddings = model.embed(image)
             >>> print(embeddings[0].shape)
@@ -527,34 +480,32 @@ class Model(torch.nn.Module):
 
     def predict(
         self,
-        source: Union[str, Path, int, Image.Image, list, tuple, np.ndarray, torch.Tensor] = None,
+        source: str | Path | int | Image.Image | list | tuple | np.ndarray | torch.Tensor = None,
         stream: bool = False,
-        onnxpath:str = None,
         predictor=None,
         **kwargs: Any,
-    ) -> List[Results]:
-        """
-        Performs predictions on the given image source using the YOLO model.
+    ) -> list[Results]:
+        """Perform predictions on the given image source using the YOLO model.
 
-        This method facilitates the prediction process, allowing various configurations through keyword arguments.
-        It supports predictions with custom predictors or the default predictor method. The method handles different
-        types of image sources and can operate in a streaming mode.
+        This method facilitates the prediction process, allowing various configurations through keyword arguments. It
+        supports predictions with custom predictors or the default predictor method. The method handles different types
+        of image sources and can operate in a streaming mode.
 
         Args:
-            source (str | Path | int | PIL.Image | np.ndarray | torch.Tensor | List | Tuple): The source
-                of the image(s) to make predictions on. Accepts various types including file paths, URLs, PIL
-                images, numpy arrays, and torch tensors.
+            source (str | Path | int | PIL.Image | np.ndarray | torch.Tensor | list | tuple): The source of the image(s)
+                to make predictions on. Accepts various types including file paths, URLs, PIL images, numpy arrays, and
+                torch tensors.
             stream (bool): If True, treats the input source as a continuous stream for predictions.
-            predictor (BasePredictor | None): An instance of a custom predictor class for making predictions.
-                If None, the method uses a default predictor.
+            predictor (BasePredictor, optional): An instance of a custom predictor class for making predictions. If
+                None, the method uses a default predictor.
             **kwargs (Any): Additional keyword arguments for configuring the prediction process.
 
         Returns:
-            (List[ultralytics.engine.results.Results]): A list of prediction results, each encapsulated in a
-                Results object.
+            (list[ultralytics.engine.results.Results]): A list of prediction results, each encapsulated in a Results
+                object.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model.predict(source="path/to/image.jpg", conf=0.25)
             >>> for r in results:
             ...     print(r.boxes.data)  # print detection bounding boxes
@@ -565,8 +516,8 @@ class Model(torch.nn.Module):
             - For SAM-type models, 'prompts' can be passed as a keyword argument.
         """
         if source is None:
-            source = ASSETS
-            LOGGER.warning(f"WARNING ⚠️ 'source' is missing. Using 'source={source}'.")
+            source = "https://ultralytics.com/images/boats.jpg" if self.task == "obb" else ASSETS
+            LOGGER.warning(f"'source' is missing. Using 'source={source}'.")
 
         is_cli = (ARGV[0].endswith("yolo") or ARGV[0].endswith("ultralytics")) and any(
             x in ARGV for x in ("predict", "track", "mode=predict", "mode=track")
@@ -576,10 +527,9 @@ class Model(torch.nn.Module):
         args = {**self.overrides, **custom, **kwargs}  # highest priority args on the right
         prompts = args.pop("prompts", None)  # for SAM-type models
 
-        if not self.predictor:
+        if not self.predictor or self.predictor.args.device != args.get("device", self.predictor.args.device):
             self.predictor = (predictor or self._smart_load("predictor"))(overrides=args, _callbacks=self.callbacks)
             self.predictor.setup_model(model=self.model, verbose=is_cli)
-            self.predictor.args.onnxpath = onnxpath
         else:  # only update args if predictor is already setup
             self.predictor.args = get_cfg(self.predictor.args, args)
             if "project" in args or "name" in args:
@@ -590,30 +540,29 @@ class Model(torch.nn.Module):
 
     def track(
         self,
-        source: Union[str, Path, int, list, tuple, np.ndarray, torch.Tensor] = None,
+        source: str | Path | int | list | tuple | np.ndarray | torch.Tensor = None,
         stream: bool = False,
         persist: bool = False,
         **kwargs: Any,
-    ) -> List[Results]:
-        """
-        Conducts object tracking on the specified input source using the registered trackers.
+    ) -> list[Results]:
+        """Conduct object tracking on the specified input source using the registered trackers.
 
         This method performs object tracking using the model's predictors and optionally registered trackers. It handles
         various input sources such as file paths or video streams, and supports customization through keyword arguments.
         The method registers trackers if not already present and can persist them between calls.
 
         Args:
-            source (Union[str, Path, int, List, Tuple, np.ndarray, torch.Tensor], optional): Input source for object
+            source (str | Path | int | list | tuple | np.ndarray | torch.Tensor, optional): Input source for object
                 tracking. Can be a file path, URL, or video stream.
             stream (bool): If True, treats the input source as a continuous video stream.
             persist (bool): If True, persists trackers between different calls to this method.
             **kwargs (Any): Additional keyword arguments for configuring the tracking process.
 
         Returns:
-            (List[ultralytics.engine.results.Results]): A list of tracking results, each a Results object.
+            (list[ultralytics.engine.results.Results]): A list of tracking results, each a Results object.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model.track(source="path/to/video.mp4", show=True)
             >>> for r in results:
             ...     print(r.boxes.id)  # print tracking IDs
@@ -635,29 +584,29 @@ class Model(torch.nn.Module):
     def val(
         self,
         validator=None,
-        onnxpath=None,
         **kwargs: Any,
     ):
-        """
-        Validate the model using a specified dataset and validation configuration.
+        """Validate the model using a specified dataset and validation configuration.
 
         This method facilitates the model validation process, allowing for customization through various settings. It
         supports validation with a custom validator or the default validation approach. The method combines default
         configurations, method-specific defaults, and user-provided arguments to configure the validation process.
 
         Args:
-            validator (ultralytics.engine.validator.BaseValidator | None): An instance of a custom validator class for
-                validating the model.
+            validator (ultralytics.engine.validator.BaseValidator, optional): An instance of a custom validator class
+                for validating the model.
             **kwargs (Any): Arbitrary keyword arguments for customizing the validation process.
 
         Returns:
-            (ultralytics.utils.metrics.DetMetrics): Validation metrics obtained from the validation process.
+            (ultralytics.utils.metrics.DetMetrics): Validation metrics obtained from the validation process. The
+                specific metrics type depends on the task (e.g., DetMetrics, SegmentMetrics,
+                PoseMetrics, ClassifyMetrics).
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model.val(data="coco8.yaml", imgsz=640)
             >>> print(results.box.map)  # Print mAP50-95
         """
@@ -665,99 +614,96 @@ class Model(torch.nn.Module):
         args = {**self.overrides, **custom, **kwargs, "mode": "val"}  # highest priority args on the right
 
         validator = (validator or self._smart_load("validator"))(args=args, _callbacks=self.callbacks)
-        validator.args.onnxpath = onnxpath
         validator(model=self.model)
         self.metrics = validator.metrics
         return validator.metrics
 
-    def benchmark(
-        self,
-        **kwargs: Any,
-    ):
-        """
-        Benchmark the model across various export formats to evaluate performance.
+    def benchmark(self, data=None, format="", verbose=False, **kwargs: Any):
+        """Benchmark the model across various export formats to evaluate performance.
 
-        This method assesses the model's performance in different export formats, such as ONNX, TorchScript, etc.
-        It uses the 'benchmark' function from the ultralytics.utils.benchmarks module. The benchmarking is
-        configured using a combination of default configuration values, model-specific arguments, method-specific
-        defaults, and any additional user-provided keyword arguments.
+        This method assesses the model's performance in different export formats, such as ONNX, TorchScript, etc. It
+        uses the 'benchmark' function from the ultralytics.utils.benchmarks module. The benchmarking is configured using
+        a combination of default configuration values, model-specific arguments, method-specific defaults, and any
+        additional user-provided keyword arguments.
 
         Args:
+            data (str | None): Path to the dataset for benchmarking. If None, uses default dataset for the task.
+            format (str): Export format name for specific benchmarking.
+            verbose (bool): Whether to print detailed benchmark information.
             **kwargs (Any): Arbitrary keyword arguments to customize the benchmarking process. Common options include:
-                - data (str): Path to the dataset for benchmarking.
-                - imgsz (int | List[int]): Image size for benchmarking.
+                - imgsz (int | list[int]): Image size for benchmarking.
                 - half (bool): Whether to use half-precision (FP16) mode.
                 - int8 (bool): Whether to use int8 precision mode.
                 - device (str): Device to run the benchmark on (e.g., 'cpu', 'cuda').
-                - verbose (bool): Whether to print detailed benchmark information.
-                - format (str): Export format name for specific benchmarking.
 
         Returns:
-            (dict): A dictionary containing the results of the benchmarking process, including metrics for
-                different export formats.
+            (polars.DataFrame): A Polars DataFrame with benchmark results for each format, including file size, metric,
+                and inference time.
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model.benchmark(data="coco8.yaml", imgsz=640, half=True)
             >>> print(results)
         """
         self._check_is_pytorch_model()
         from ultralytics.utils.benchmarks import benchmark
 
+        from .exporter import export_formats
+
         custom = {"verbose": False}  # method defaults
         args = {**DEFAULT_CFG_DICT, **self.model.args, **custom, **kwargs, "mode": "benchmark"}
+        fmts = export_formats()
+        export_args = set(dict(zip(fmts["Argument"], fmts["Arguments"])).get(format, [])) - {"batch"}
+        export_kwargs = {k: v for k, v in args.items() if k in export_args}
         return benchmark(
             model=self,
-            data=kwargs.get("data"),  # if no 'data' argument passed set data=None for default datasets
+            data=data,  # if no 'data' argument passed set data=None for default datasets
             imgsz=args["imgsz"],
-            half=args["half"],
-            int8=args["int8"],
             device=args["device"],
-            verbose=kwargs.get("verbose", False),
-            format=kwargs.get("format", ""),
+            verbose=verbose,
+            format=format,
+            **export_kwargs,
         )
 
     def export(
         self,
         **kwargs: Any,
     ) -> str:
-        """
-        Export the model to a different format suitable for deployment.
+        """Export the model to a different format suitable for deployment.
 
         This method facilitates the export of the model to various formats (e.g., ONNX, TorchScript) for deployment
         purposes. It uses the 'Exporter' class for the export process, combining model-specific overrides, method
         defaults, and any additional arguments provided.
 
         Args:
-            **kwargs (Any): Arbitrary keyword arguments to customize the export process. These are combined with
-                the model's overrides and method defaults. Common arguments include:
-                format (str): Export format (e.g., 'onnx', 'engine', 'coreml').
-                half (bool): Export model in half-precision.
-                int8 (bool): Export model in int8 precision.
-                device (str): Device to run the export on.
-                workspace (int): Maximum memory workspace size for TensorRT engines.
-                nms (bool): Add Non-Maximum Suppression (NMS) module to model.
-                simplify (bool): Simplify ONNX model.
+            **kwargs (Any): Arbitrary keyword arguments for export configuration. Common options include:
+                - format (str): Export format (e.g., 'onnx', 'engine', 'coreml').
+                - half (bool): Export model in half-precision.
+                - int8 (bool): Export model in int8 precision.
+                - device (str): Device to run the export on.
+                - workspace (int): Maximum memory workspace size for TensorRT engines.
+                - nms (bool): Add Non-Maximum Suppression (NMS) module to model.
+                - simplify (bool): Simplify ONNX model.
 
         Returns:
             (str): The path to the exported model file.
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
             ValueError: If an unsupported export format is specified.
             RuntimeError: If the export process fails due to errors.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> model.export(format="onnx", dynamic=True, simplify=True)
             'path/to/exported/model.onnx'
         """
         self._check_is_pytorch_model()
         from .exporter import Exporter
-        print(f'self.model {self.model}')
+
         custom = {
             "imgsz": self.model.args["imgsz"],
             "batch": 1,
@@ -773,45 +719,48 @@ class Model(torch.nn.Module):
         trainer=None,
         **kwargs: Any,
     ):
-        """
-        Trains the model using the specified dataset and training configuration.
+        """Train the model using the specified dataset and training configuration.
 
-        This method facilitates model training with a range of customizable settings. It supports training with a
-        custom trainer or the default training approach. The method handles scenarios such as resuming training
-        from a checkpoint, integrating with Ultralytics HUB, and updating model and configuration after training.
+        This method facilitates model training with a range of customizable settings. It supports training with a custom
+        trainer or the default training approach. The method handles scenarios such as resuming training from a
+        checkpoint, integrating with Ultralytics HUB, and updating model and configuration after training.
 
-        When using Ultralytics HUB, if the session has a loaded model, the method prioritizes HUB training
-        arguments and warns if local arguments are provided. It checks for pip updates and combines default
-        configurations, method-specific defaults, and user-provided arguments to configure the training process.
+        When using Ultralytics HUB, if the session has a loaded model, the method prioritizes HUB training arguments and
+        warns if local arguments are provided. It checks for pip updates and combines default configurations,
+        method-specific defaults, and user-provided arguments to configure the training process.
 
         Args:
-            trainer (BaseTrainer | None): Custom trainer instance for model training. If None, uses default.
+            trainer (BaseTrainer, optional): Custom trainer instance for model training. If None, uses default.
             **kwargs (Any): Arbitrary keyword arguments for training configuration. Common options include:
-                data (str): Path to dataset configuration file.
-                epochs (int): Number of training epochs.
-                batch_size (int): Batch size for training.
-                imgsz (int): Input image size.
-                device (str): Device to run training on (e.g., 'cuda', 'cpu').
-                workers (int): Number of worker threads for data loading.
-                optimizer (str): Optimizer to use for training.
-                lr0 (float): Initial learning rate.
-                patience (int): Epochs to wait for no observable improvement for early stopping of training.
+                - data (str): Path to dataset configuration file.
+                - epochs (int): Number of training epochs.
+                - batch (int): Batch size for training.
+                - imgsz (int): Input image size.
+                - device (str): Device to run training on (e.g., 'cuda', 'cpu').
+                - workers (int): Number of worker threads for data loading.
+                - optimizer (str): Optimizer to use for training.
+                - lr0 (float): Initial learning rate.
+                - patience (int): Epochs to wait for no observable improvement for early stopping of training.
+                - augmentations (list[Callable]): List of augmentation functions to apply during training.
 
         Returns:
-            (Dict | None): Training metrics if available and training is successful; otherwise, None.
+            (ultralytics.utils.metrics.DetMetrics | None): Training metrics if available and training is successful;
+                otherwise, None. The specific metrics type depends on the task.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model.train(data="coco8.yaml", epochs=3)
         """
         self._check_is_pytorch_model()
         if hasattr(self.session, "model") and self.session.model.id:  # Ultralytics HUB session with loaded model
             if any(kwargs):
-                LOGGER.warning("WARNING ⚠️ using HUB training arguments, ignoring local training arguments.")
+                LOGGER.warning("using HUB training arguments, ignoring local training arguments.")
             kwargs = self.session.train_args  # overwrite kwargs
 
         checks.check_pip_update_available()
 
+        if isinstance(kwargs.get("pretrained", None), (str, Path)):
+            self.load(kwargs["pretrained"])  # load pretrained weights if provided
         overrides = YAML.load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
         custom = {
             # NOTE: handle the case when 'cfg' includes 'data'.
@@ -819,7 +768,9 @@ class Model(torch.nn.Module):
             "model": self.overrides["model"],
             "task": self.task,
         }  # method defaults
-        args = {**overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
+        args = {**overrides, **custom, **kwargs, "mode": "train", "session": self.session}  # prioritizes rightmost args
+        if args.get("qat") and not args.get("qat_validate"):
+            args["val"] = False
         if args.get("resume"):
             args["resume"] = self.ckpt_path
 
@@ -827,138 +778,126 @@ class Model(torch.nn.Module):
         if not args.get("resume"):  # manually set model only if not resuming
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model
-        
+        if args.get("qat") and not self.trainer.ddp:
+            self._prepare_qat_training(args)
+        elif args.get("qat"):
+            LOGGER.info("PT2E QAT graph preparation is deferred to each DDP rank.")
 
-        self.max_stride = int(self.model.stride.max())
-
-        # # testing acc
-        # if self.task in ["segment"]:
-        #     self.trainer.loss_items = torch.zeros(4).to(device)
-        # else:
-        #     self.trainer.loss_items = torch.zeros(3).to(device)
-        # self.trainer._setup_train(1)
-        # self.trainer.epoch = 0
-
-        # print('float model acc before quantization!')
-        # metrics = self.trainer.validator(self.trainer)
-
-
-        # export float onnx
-        inp_h, inp_w = kwargs.get('qat_onnx_imgsz', [640, 640])
-        qat_onnx_sp = kwargs.get('qat_onnx_sp', './last_checkpoint.onnx')
-        path_obj = Path(qat_onnx_sp)
-        path_parent = path_obj.parent
-        path_parent.mkdir(parents=True, exist_ok=True)
-        file_name = path_obj.stem
-        qat_onnx_sim_sp = f"{path_parent}/{file_name}_qat_slim.onnx"
-
-        # print(f'RANK {RANK}')
-        # print(f'LOCAL_RANK {LOCAL_RANK}')
-        if RANK >= 0:
-            device = f'cuda:{LOCAL_RANK}'
-        else:
-            device = torch.device("cuda")
-        # print(inputs.device)
-        # print(next(iter(self.model.state_dict().values())).device) 
-        # print(f'RANK {RANK}')
-        # print(f'LOCAL_RANK {LOCAL_RANK}')
-        self.model.to(device)
-        # print(f'device {device}')
-        # print(f'RANK {RANK}')
-        if RANK in [-1, 0]:
-            try:
-                inputs = torch.rand(2, 3, inp_h, inp_w).to(device)
-                print(f'export onnx input shape: {inputs.shape}')
-                onnx_program = torch.onnx.export(self.model, (inputs,), dynamo=False)
-                onnx_program.optimize()
-                onnx_program.save(f"{path_parent}/{file_name}_dynamo_float.onnx")
-                torch.onnx.export(
-                    self.model,
-                    inputs,
-                    f"{path_parent}/{file_name}_float.onnx",
-                    opset_version=18
-                )
-                onnx_model = onnx.load(f"{path_parent}/{file_name}_float.onnx")
-                model_simp, check = simplify(onnx_model)
-                assert check, "Simplified ONNX model could not be validated"
-                onnx.save(model_simp, f"{path_parent}/{file_name}_float_sim.onnx")
-            except Exception as e:
-                LOGGER.warning(' export onnx error!')
-        # quantizer
-        config_path = "./config.json"
-        quantizer = AXQuantizer(config_path)
-
-        self.model = self.model.to(self.device)
-        inputs = torch.rand(2, 3, inp_h, inp_w).to(self.device)
-        dynamic_shapes = {
-            "x":{0: torch.export.Dim.AUTO, 2: torch.export.Dim.AUTO, 3: torch.export.Dim.AUTO} 
-        }
-
-        # export model for training with dynamic shapes
-        exported_model = torch.export.export_for_training(self.model, (inputs,), dynamic_shapes=dynamic_shapes) 
-        # torch.ao.quantization.allow_exported_model_train_eval(exported_model)
-        exported_module = exported_model.module()
-
-        # # testing acc of exported model before quantization
-        # print('export_model acc before qat!')    
-        # self.trainer.export_model = exported_module.to(device)
-        # metrics = self.trainer.validator(self.trainer) 
-
-        # prepare model for PT2E QAT
-        prepared_model = prepare_qat_pt2e(exported_module, quantizer)
-        torch.ao.quantization.move_exported_model_to_eval(prepared_model)
-        torch.ao.quantization.allow_exported_model_train_eval(prepared_model)
-
-        # # testing acc of prepared model
-        # print('prepared_model acc before qat!')
-        # metrics = self.trainer.validator(self.trainer) 
-    
-        # TODO: 验证是否正常
-        qat_state_dict = self.ckpt.get("qat_model") if isinstance(self.ckpt, dict) else None
-        if qat_state_dict:
-            incompatible = prepared_model.load_state_dict(qat_state_dict, strict=False)
-            missing = len(incompatible.missing_keys)
-            unexpected = len(incompatible.unexpected_keys)
-            if missing or unexpected:
-                LOGGER.warning(
-                    "Loaded QAT state from %s with %d missing and %d unexpected keys.",
-                    self.ckpt_path,
-                    missing,
-                    unexpected,
-                )
-            else:
-                LOGGER.info("Loaded QAT state from %s into prepared PT2E model.", self.ckpt_path)
-
-        self.trainer.qat_model = prepared_model.to(device)
-        self.model = self.model.to(device)
-
-        self.trainer.hub_session = self.session  # attach optional HUB session
         self.trainer.train()
-
         # Update model and cfg after training
         if RANK in {-1, 0}:
-            ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last
-            self.model, self.ckpt = attempt_load_one_weight(ckpt)
-            self.overrides = self.model.args
+            if args.get("qat"):
+                self.model = self.trainer.model
+                self.ckpt = {}
+                model_args = args if self.trainer.ddp else self.model.args
+                self.overrides = self._reset_ckpt_args(model_args)
+            else:
+                ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last
+                self.model, self.ckpt = load_checkpoint(ckpt)
+                self.overrides = self._reset_ckpt_args(self.model.args)
             self.metrics = getattr(self.trainer.validator, "metrics", None)  # TODO: no metrics returned by DDP
-
-            # 保存last-qat.pt
-            qat_pt_sp = f"{path_parent}/{file_name}_qat.pt"
-            torch.save(self.trainer.qat_model.state_dict(), qat_pt_sp)
-
-            # 保存last-qat.onnx
-            prepared_model_copy = copy.deepcopy(self.trainer.qat_model)
-            quantized_model = convert_pt2e(prepared_model_copy)
-            onnx_program = torch.onnx.export(quantized_model, (inputs.to("cuda"),), dynamo=True, opset_version=21)
-            onnx_program.optimize()
-            onnx_program.save(qat_onnx_sp)
-
-            model_simp = slim(onnx_program.model_proto)
-            onnx.save(model_simp, qat_onnx_sim_sp)
-            print(f"save onnx model to [{qat_onnx_sim_sp}] Successfully!")
-
-
         return self.metrics
+
+    def _prepare_qat_training(self, args: dict[str, Any]) -> None:
+        """Prepare a PT2E QAT graph for the trainer."""
+        trainer_args = vars(self.trainer.args) if getattr(self.trainer, "args", None) is not None else {}
+        effective_args = {**args, **trainer_args}
+
+        qat_device = self.trainer.device
+        if self.trainer.world_size > 1:
+            if LOCAL_RANK < 0:
+                raise RuntimeError("Multi-GPU PT2E QAT preparation must run inside a distributed worker")
+            qat_device = torch.device("cuda", LOCAL_RANK)
+            self.trainer.device = qat_device
+
+        config_path = resolve_qat_config_path(effective_args.get("qat_config") or "config-qat/config.json")
+        if not config_path.exists():
+            raise FileNotFoundError(f"QAT config file not found: {config_path}")
+
+        source_model = self.trainer.model if isinstance(self.trainer.model, torch.nn.Module) else self.model
+        if not isinstance(source_model, torch.nn.Module):
+            source_model, _ = load_checkpoint(str(self.trainer.model), device="cpu", fuse=False)
+        float_model = deepcopy(source_model).float().to(qat_device).train()
+        for param in float_model.parameters():
+            if param.dtype.is_floating_point and not param.requires_grad:
+                param.requires_grad_(True)
+        if RANK in {-1, 0}:
+            self._export_qat_debug_onnx(float_model, effective_args)
+        self.trainer.teacher_model = None
+        if effective_args.get("qat_kd"):
+            teacher_model = deepcopy(float_model).float().to(qat_device).eval()
+            teacher_model.requires_grad_(False)
+            self.trainer.teacher_model = teacher_model
+            LOGGER.info("Prepared frozen float teacher for QAT KD training.")
+
+        _, prepared_model = prepare_pt2e_qat_model(
+            float_model=float_model,
+            device=qat_device,
+            config_path=config_path,
+            imgsz=self.trainer.args.imgsz,
+            dynamic_batch_max=effective_args.get("qat_dynamic_batch_max", 128),
+            use_lsq=effective_args.get("qat_lsq", False),
+        )
+        resume_qat_state = self.ckpt.get("qat_model") if isinstance(self.ckpt, dict) else None
+        if resume_qat_state is not None:
+            prepared_model.load_state_dict(resume_qat_state)
+            LOGGER.info("Restored QAT graph state from checkpoint for resume.")
+        self.trainer.export_model = None
+        self.trainer.export_model_eval = None
+        self.trainer.qat_model = prepared_model
+        self.trainer.qat_ema = None  # EMA will be created lazily after first batch initializes observers
+        ckpt_qat_ema = self.ckpt.get("qat_ema") if isinstance(self.ckpt, dict) else None
+        if ckpt_qat_ema is not None and effective_args.get("qat_ema", True):
+            from ultralytics.utils.torch_utils import ModelEMA
+
+            self.trainer.qat_ema = ModelEMA(prepared_model, decay=0.9999, tau=2000)
+            self.trainer.qat_ema.ema.load_state_dict(ckpt_qat_ema)
+            self.trainer.qat_ema.updates = self.ckpt.get("qat_ema_updates", 0)
+            LOGGER.info("Restored QAT EMA state from checkpoint for resume.")
+        LOGGER.info(
+            f"Prepared PT2E QAT model with fixed spatial size={self.trainer.args.imgsz} "
+            f"and dynamic batch<= {effective_args.get('qat_dynamic_batch_max', 128)}."
+        )
+        if not effective_args.get("qat_validate"):
+            LOGGER.info("PT2E QAT validation is disabled during training. Set `qat_validate=True` to re-enable it.")
+
+    def _export_qat_debug_onnx(self, float_model: torch.nn.Module, args: dict[str, Any]) -> None:
+        """Export float training-graph ONNX debug artifacts without switching the model to eval/export mode."""
+        import onnx
+        from onnxsim import simplify
+
+        try:
+            imgsz = args.get("qat_onnx_imgsz") or args.get("imgsz") or 640
+            if isinstance(imgsz, int):
+                inp_h = inp_w = int(imgsz)
+            elif len(imgsz) == 1:
+                inp_h = inp_w = int(imgsz[0])
+            else:
+                inp_h, inp_w = int(imgsz[0]), int(imgsz[1])
+
+            inputs = torch.rand(1, 3, inp_h, inp_w)
+            dynamo_path = Path("./dynamo_float.onnx")
+            float_path = Path("./float.onnx")
+            sim_path = Path("./float_sim.onnx")
+            model = deepcopy(float_model).float().cpu().train()
+
+            onnx_program = torch.onnx.export(model, (inputs,), dynamo=True)
+            if hasattr(onnx_program, "optimize"):
+                onnx_program.optimize()
+            onnx_program.save(dynamo_path)
+            LOGGER.info(f"Exported float training-graph ONNX to {dynamo_path}.")
+
+            torch.onnx.export(model, inputs, float_path, opset_version=18)
+            LOGGER.info(f"Exported float ONNX to {float_path}.")
+
+            onnx_model = onnx.load(float_path)
+            model_simp, check = simplify(onnx_model)
+            if not check:
+                raise RuntimeError("Simplified ONNX model could not be validated")
+            onnx.save(model_simp, sim_path)
+            LOGGER.info(f"Exported float training-graph ONNX debug artifacts to {float_path} and {sim_path}.")
+        except Exception:
+            LOGGER.warning("Skipping float ONNX debug export due to export error.")
 
     def tune(
         self,
@@ -967,13 +906,12 @@ class Model(torch.nn.Module):
         *args: Any,
         **kwargs: Any,
     ):
-        """
-        Conducts hyperparameter tuning for the model, with an option to use Ray Tune.
+        """Conduct hyperparameter tuning for the model, with an option to use Ray Tune.
 
-        This method supports two modes of hyperparameter tuning: using Ray Tune or a custom tuning method.
-        When Ray Tune is enabled, it leverages the 'run_ray_tune' function from the ultralytics.utils.tuner module.
-        Otherwise, it uses the internal 'Tuner' class for tuning. The method combines default, overridden, and
-        custom arguments to configure the tuning process.
+        This method supports two modes of hyperparameter tuning: using Ray Tune or a custom tuning method. When Ray Tune
+        is enabled, it leverages the 'run_ray_tune' function from the ultralytics.utils.tuner module. Otherwise, it uses
+        the internal 'Tuner' class for tuning. The method combines default, overridden, and custom arguments to
+        configure the tuning process.
 
         Args:
             use_ray (bool): Whether to use Ray Tune for hyperparameter tuning. If False, uses internal tuning method.
@@ -983,13 +921,14 @@ class Model(torch.nn.Module):
                 overrides and defaults to configure the tuning process.
 
         Returns:
-            (dict): Results of the hyperparameter search, including best parameters and performance metrics.
+            (ray.tune.ResultGrid | None): When use_ray=True, returns a ResultGrid with hyperparameter search results.
+                When use_ray=False, returns None and saves best hyperparameters to YAML.
 
         Raises:
             TypeError: If the model is not a PyTorch model.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> results = model.tune(data="coco8.yaml", iterations=5)
             >>> print(results)
 
@@ -1006,54 +945,52 @@ class Model(torch.nn.Module):
 
             custom = {}  # method defaults
             args = {**self.overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
-            return Tuner(args=args, _callbacks=self.callbacks)(model=self, iterations=iterations)
+            return Tuner(args=args, _callbacks=self.callbacks)(iterations=iterations)
 
-    def _apply(self, fn) -> "Model":
-        """
-        Apply a function to model tensors that are not parameters or registered buffers.
+    def _apply(self, fn) -> Model:
+        """Apply a function to model parameters, buffers, and tensors.
 
         This method extends the functionality of the parent class's _apply method by additionally resetting the
-        predictor and updating the device in the model's overrides. It's typically used for operations like
-        moving the model to a different device or changing its precision.
+        predictor and updating the device in the model's overrides. It's typically used for operations like moving the
+        model to a different device or changing its precision.
 
         Args:
-            fn (Callable): A function to be applied to the model's tensors. This is typically a method like
-                to(), cpu(), cuda(), half(), or float().
+            fn (Callable): A function to be applied to the model's tensors. This is typically a method like to(), cpu(),
+                cuda(), half(), or float().
 
         Returns:
             (Model): The model instance with the function applied and updated attributes.
 
         Raises:
-            AssertionError: If the model is not a PyTorch model.
+            TypeError: If the model is not a PyTorch model.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
+            >>> model = Model("yolo26n.pt")
             >>> model = model._apply(lambda t: t.cuda())  # Move model to GPU
         """
         self._check_is_pytorch_model()
-        self = super()._apply(fn)  # noqa
+        self = super()._apply(fn)
         self.predictor = None  # reset predictor as device may have changed
         self.overrides["device"] = self.device  # was str(self.device) i.e. device(type='cuda', index=0) -> 'cuda:0'
         return self
 
     @property
-    def names(self) -> Dict[int, str]:
-        """
-        Retrieves the class names associated with the loaded model.
+    def names(self) -> dict[int, str]:
+        """Retrieve the class names associated with the loaded model.
 
         This property returns the class names if they are defined in the model. It checks the class names for validity
         using the 'check_class_names' function from the ultralytics.nn.autobackend module. If the predictor is not
         initialized, it sets it up before retrieving the names.
 
         Returns:
-            (Dict[int, str]): A dictionary of class names associated with the model, where keys are class indices and
+            (dict[int, str]): A dictionary of class names associated with the model, where keys are class indices and
                 values are the corresponding class names.
 
         Raises:
             AttributeError: If the model or predictor does not have a 'names' attribute.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> print(model.names)
             {0: 'person', 1: 'bicycle', 2: 'car', ...}
         """
@@ -1062,26 +999,24 @@ class Model(torch.nn.Module):
         if hasattr(self.model, "names"):
             return check_class_names(self.model.names)
         if not self.predictor:  # export formats will not have predictor defined until predict() is called
-            self.predictor = self._smart_load("predictor")(overrides=self.overrides, _callbacks=self.callbacks)
-            self.predictor.setup_model(model=self.model, verbose=False)
+            predictor = self._smart_load("predictor")(overrides=self.overrides, _callbacks=self.callbacks)
+            predictor.setup_model(model=self.model, verbose=False)  # do not mess with self.predictor.model args
+            return predictor.model.names
         return self.predictor.model.names
 
     @property
     def device(self) -> torch.device:
-        """
-        Get the device on which the model's parameters are allocated.
+        """Get the device on which the model's parameters are allocated.
 
         This property determines the device (CPU or GPU) where the model's parameters are currently stored. It is
         applicable only to models that are instances of torch.nn.Module.
 
         Returns:
-            (torch.device): The device (CPU/GPU) of the model.
-
-        Raises:
-            AttributeError: If the model is not a torch.nn.Module instance.
+            (torch.device | None): The device (CPU/GPU) of the model, or None if the model is not a torch.nn.Module
+                instance.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> print(model.device)
             device(type='cuda', index=0)  # if CUDA is available
             >>> model = model.to("cpu")
@@ -1092,18 +1027,17 @@ class Model(torch.nn.Module):
 
     @property
     def transforms(self):
-        """
-        Retrieves the transformations applied to the input data of the loaded model.
+        """Retrieve the transformations applied to the input data of the loaded model.
 
-        This property returns the transformations if they are defined in the model. The transforms
-        typically include preprocessing steps like resizing, normalization, and data augmentation
-        that are applied to input data before it is fed into the model.
+        This property returns the transformations if they are defined in the model. The transforms typically include
+        preprocessing steps like resizing, normalization, and data augmentation that are applied to input data before it
+        is fed into the model.
 
         Returns:
             (object | None): The transform object of the model if available, otherwise None.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> transforms = model.transforms
             >>> if transforms:
             ...     print(f"Model transforms: {transforms}")
@@ -1113,45 +1047,40 @@ class Model(torch.nn.Module):
         return self.model.transforms if hasattr(self.model, "transforms") else None
 
     def add_callback(self, event: str, func) -> None:
-        """
-        Add a callback function for a specified event.
+        """Add a callback function for a specified event.
 
-        This method allows registering custom callback functions that are triggered on specific events during
-        model operations such as training or inference. Callbacks provide a way to extend and customize the
-        behavior of the model at various stages of its lifecycle.
+        This method allows registering custom callback functions that are triggered on specific events during model
+        operations such as training or inference. Callbacks provide a way to extend and customize the behavior of the
+        model at various stages of its lifecycle.
 
         Args:
-            event (str): The name of the event to attach the callback to. Must be a valid event name recognized
-                by the Ultralytics framework.
-            func (Callable): The callback function to be registered. This function will be called when the
-                specified event occurs.
-
-        Raises:
-            ValueError: If the event name is not recognized or is invalid.
+            event (str): The name of the event to attach the callback to. Must be a valid event name recognized by the
+                Ultralytics framework.
+            func (Callable): The callback function to be registered. This function will be called when the specified
+                event occurs.
 
         Examples:
             >>> def on_train_start(trainer):
             ...     print("Training is starting!")
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> model.add_callback("on_train_start", on_train_start)
             >>> model.train(data="coco8.yaml", epochs=1)
         """
         self.callbacks[event].append(func)
 
     def clear_callback(self, event: str) -> None:
-        """
-        Clears all callback functions registered for a specified event.
+        """Clear all callback functions registered for a specified event.
 
-        This method removes all custom and default callback functions associated with the given event.
-        It resets the callback list for the specified event to an empty list, effectively removing all
-        registered callbacks for that event.
+        This method removes all custom and default callback functions associated with the given event. It resets the
+        callback list for the specified event to an empty list, effectively removing all registered callbacks for that
+        event.
 
         Args:
             event (str): The name of the event for which to clear the callbacks. This should be a valid event name
                 recognized by the Ultralytics callback system.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> model.add_callback("on_train_start", lambda: print("Training started"))
             >>> model.clear_callback("on_train_start")
             >>> # All callbacks for 'on_train_start' are now removed
@@ -1167,8 +1096,7 @@ class Model(torch.nn.Module):
         self.callbacks[event] = []
 
     def reset_callbacks(self) -> None:
-        """
-        Reset all callbacks to their default functions.
+        """Reset all callbacks to their default functions.
 
         This method reinstates the default callback functions for all events, removing any custom callbacks that were
         previously added. It iterates through all default callback events and replaces the current callbacks with the
@@ -1181,28 +1109,27 @@ class Model(torch.nn.Module):
         modifications, ensuring consistent behavior across different runs or experiments.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> model.add_callback("on_train_start", custom_function)
             >>> model.reset_callbacks()
             # All callbacks are now reset to their default functions
         """
-        for event in callbacks.default_callbacks.keys():
+        for event in callbacks.default_callbacks:
             self.callbacks[event] = [callbacks.default_callbacks[event][0]]
 
     @staticmethod
-    def _reset_ckpt_args(args: dict) -> dict:
-        """
-        Reset specific arguments when loading a PyTorch model checkpoint.
+    def _reset_ckpt_args(args: dict[str, Any] | Any) -> dict[str, Any]:
+        """Reset specific arguments when loading a PyTorch model checkpoint.
 
-        This method filters the input arguments dictionary to retain only a specific set of keys that are
-        considered important for model loading. It's used to ensure that only relevant arguments are preserved
-        when loading a model from a checkpoint, discarding any unnecessary or potentially conflicting settings.
+        This method filters the input arguments dictionary to retain only a specific set of keys that are considered
+        important for model loading. It's used to ensure that only relevant arguments are preserved when loading a model
+        from a checkpoint, discarding any unnecessary or potentially conflicting settings.
 
         Args:
-            args (dict): A dictionary containing various model arguments and settings.
+            args (dict[str, Any]): A dictionary containing various model arguments and settings.
 
         Returns:
-            (dict): A new dictionary containing only the specified include keys from the input arguments.
+            (dict[str, Any]): A new dictionary containing only the specified include keys from the input arguments.
 
         Examples:
             >>> original_args = {"imgsz": 640, "data": "coco.yaml", "task": "detect", "batch": 16, "epochs": 100}
@@ -1210,8 +1137,24 @@ class Model(torch.nn.Module):
             >>> print(reset_args)
             {'imgsz': 640, 'data': 'coco.yaml', 'task': 'detect'}
         """
-        include = {"imgsz", "data", "task", "single_cls"}  # only remember these arguments when loading a PyTorch model
-        return {k: v for k, v in args.items() if k in include}
+        include = {
+            "imgsz",
+            "data",
+            "task",
+            "single_cls",
+            "qat",
+            "qat_config",
+            "qat_validate",
+            "qat_kd",
+            "qat_kd_lambda",
+            "qat_kd_temperature",
+            "qat_dynamic_batch_max",
+            "qat_onnx_imgsz",
+            "qat_pt_path",
+            "qat_onnx_sp",
+        }  # keep QAT args so resume can rebuild the PT2E graph before loading optimizer state
+        args_dict = args if isinstance(args, dict) else vars(args)
+        return {k: v for k, v in args_dict.items() if k in include}
 
     # def __getattr__(self, attr):
     #    """Raises error if object has no requested attribute."""
@@ -1219,12 +1162,11 @@ class Model(torch.nn.Module):
     #    raise AttributeError(f"'{name}' object has no attribute '{attr}'. See valid attributes below.\n{self.__doc__}")
 
     def _smart_load(self, key: str):
-        """
-        Intelligently loads the appropriate module based on the model task.
+        """Intelligently load the appropriate module based on the model task.
 
-        This method dynamically selects and returns the correct module (model, trainer, validator, or predictor)
-        based on the current task of the model and the provided key. It uses the task_map dictionary to determine
-        the appropriate module to load for the specific task.
+        This method dynamically selects and returns the correct module (model, trainer, validator, or predictor) based
+        on the current task of the model and the provided key. It uses the task_map dictionary to determine the
+        appropriate module to load for the specific task.
 
         Args:
             key (str): The type of module to load. Must be one of 'model', 'trainer', 'validator', or 'predictor'.
@@ -1245,30 +1187,27 @@ class Model(torch.nn.Module):
         except Exception as e:
             name = self.__class__.__name__
             mode = inspect.stack()[1][3]  # get the function name.
-            raise NotImplementedError(
-                emojis(f"WARNING ⚠️ '{name}' model does not support '{mode}' mode for '{self.task}' task yet.")
-            ) from e
+            raise NotImplementedError(f"'{name}' model does not support '{mode}' mode for '{self.task}' task.") from e
 
     @property
     def task_map(self) -> dict:
-        """
-        Provides a mapping from model tasks to corresponding classes for different modes.
+        """Provide a mapping from model tasks to corresponding classes for different modes.
 
-        This property method returns a dictionary that maps each supported task (e.g., detect, segment, classify)
-        to a nested dictionary. The nested dictionary contains mappings for different operational modes
-        (model, trainer, validator, predictor) to their respective class implementations.
+        This property method returns a dictionary that maps each supported task (e.g., detect, segment, classify) to a
+        nested dictionary. The nested dictionary contains mappings for different operational modes (model, trainer,
+        validator, predictor) to their respective class implementations.
 
-        The mapping allows for dynamic loading of appropriate classes based on the model's task and the
-        desired operational mode. This facilitates a flexible and extensible architecture for handling
-        various tasks and modes within the Ultralytics framework.
+        The mapping allows for dynamic loading of appropriate classes based on the model's task and the desired
+        operational mode. This facilitates a flexible and extensible architecture for handling various tasks and modes
+        within the Ultralytics framework.
 
         Returns:
-            (Dict[str, Dict[str, Any]]): A dictionary mapping task names to nested dictionaries. Each nested dictionary
-            contains mappings for 'model', 'trainer', 'validator', and 'predictor' keys to their respective class
-            implementations for that task.
+            (dict[str, dict[str, Any]]): A dictionary mapping task names to nested dictionaries. Each nested dictionary
+                contains mappings for 'model', 'trainer', 'validator', and 'predictor' keys to their respective class
+                implementations for that task.
 
         Examples:
-            >>> model = Model("yolo11n.pt")
+            >>> model = Model("yolo26n.pt")
             >>> task_map = model.task_map
             >>> detect_predictor = task_map["detect"]["predictor"]
             >>> segment_trainer = task_map["segment"]["trainer"]
@@ -1276,8 +1215,7 @@ class Model(torch.nn.Module):
         raise NotImplementedError("Please provide task map for your model!")
 
     def eval(self):
-        """
-        Sets the model to evaluation mode.
+        """Sets the model to evaluation mode.
 
         This method changes the model's mode to evaluation, which affects layers like dropout and batch normalization
         that behave differently during training and evaluation. In evaluation mode, these layers use running statistics
@@ -1287,7 +1225,7 @@ class Model(torch.nn.Module):
             (Model): The model instance with evaluation mode set.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> model.eval()
             >>> # Model is now in evaluation mode for inference
         """
@@ -1295,8 +1233,7 @@ class Model(torch.nn.Module):
         return self
 
     def __getattr__(self, name):
-        """
-        Enable accessing model attributes directly through the Model class.
+        """Enable accessing model attributes directly through the Model class.
 
         This method provides a way to access attributes of the underlying model directly through the Model class
         instance. It first checks if the requested attribute is 'model', in which case it returns the model from
@@ -1312,7 +1249,7 @@ class Model(torch.nn.Module):
             AttributeError: If the requested attribute does not exist in the model.
 
         Examples:
-            >>> model = YOLO("yolo11n.pt")
+            >>> model = YOLO("yolo26n.pt")
             >>> print(model.stride)  # Access model.stride attribute
             >>> print(model.names)  # Access model.names attribute
         """
