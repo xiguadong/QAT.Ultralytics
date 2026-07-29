@@ -3,6 +3,8 @@
 本仓库基于 [Ultralytics-8.4](https://github.com/ultralytics/ultralytics/tree/v8.4.21)，提供
 `YOLO26` 和 `YOLO11` 系列 PT2E QAT 的训练、QuantONNX 导出和 AXERA 部署兼容处理。
 
+操作建议：初期请选用小批量数据集，仅训练 1 个 epoch；随后依次执行 eval.py 与 export.py 完成验证及模型导出，最后进行板端部署。务必先完整走通上述端到端流程，确认无误后再启动全量数据训练。
+
 ## 精度结果
 
 ### 检测
