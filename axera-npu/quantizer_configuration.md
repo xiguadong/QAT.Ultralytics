@@ -22,8 +22,8 @@ profile 中的 FX 节点名称限制位于 `config-qat/*.json`，不在 quantize
 ```json
 {
   "is_symmetric": true,
-  "input": { "dtype": "S8", "qmin": -127, "qmax": 127 },
-  "output": { "dtype": "U8", "qmin": 0, "qmax": 255 }
+  "input": {"dtype": "S8", "qmin": -127, "qmax": 127},
+  "output": {"dtype": "U8", "qmin": 0, "qmax": 255}
 }
 ```
 
@@ -43,8 +43,8 @@ profile 中的 FX 节点名称限制位于 `config-qat/*.json`，不在 quantize
 {
   "is_symmetric": false,
   "output_is_symmetric": true,
-  "input": { "dtype": "U8", "qmin": 0, "qmax": 255 },
-  "output": { "dtype": "S8", "qmin": -127, "qmax": 127 }
+  "input": {"dtype": "U8", "qmin": 0, "qmax": 255},
+  "output": {"dtype": "S8", "qmin": -127, "qmax": 127}
 }
 ```
 
@@ -107,34 +107,50 @@ Attention S8 是 YOLO26/YOLO11 可复用的基础策略：
 - 第一 MatMul 输出以及中间 Mul、Softmax 保持 S8。
 - 第二 MatMul 输出恢复 U8。
 
-不含分类头补偿的基础模板为 `config-qat/config_siluInU16_attnS8.json` 和
-`config-qat/config_siluInU8_attnS8.json`。当前 YOLO26 `accuracy`/`throughput` 在此基础上增加分类塔
-U16，使用文件名带 `_clsU16` 的组合配置。YOLO11 不使用 YOLO26 的分类头 U16 区域；应从基础模板重新发现，
-生成其专用 JSON。quantizer 中没有写死 Attention 节点编号。
+- 不含分类头补偿的基础模板为 `config-qat/config_siluInU16_attnS8.json` 和 `config-qat/config_siluInU8_attnS8.json`。
+- 当前 YOLO26 `accuracy`/`throughput` 在此基础上增加分类塔 U16，使用文件名带 `_clsU16` 的组合配置。
+- YOLO11 不使用 YOLO26 的分类头 U16 区域；应从基础模板重新发现，生成其专用 JSON。
+- quantizer 中没有写死 Attention 节点编号。
 
 ### 3.1 QAT 配置与已验证组合
 
 所有配置都按各自 JSON 保持 Attention 所需的 S8 量化边界。`clsU16` 是当前 YOLO26n 分类头的可选
 精度补偿，不应直接套用到 YOLO11、分割模型或结构已修改的模型：
 
-| 配置                                                     | 普通 SiLU            | 头部局部配置                                                          | 建议用途                                                  |
-| -------------------------------------------------------- | -------------------- | --------------------------------------------------------------------- | --------------------------------------------------------- |
-| `config-qat/config_siluInU16_attnS8_clsU16.json`         | input U16，output U8 | 最后两个尺度的 SiLU、Conv 和 score output 为 U16                      | YOLO26n `accuracy` profile，优先保留激活精度              |
-| `config-qat/config_siluInU8_attnS8_clsU16.json`          | input/output U8      | 最后两个尺度的 SiLU、Conv 和 score output 为 U16                      | YOLO26n `throughput` profile，优先降低带宽和计算开销      |
-| `config-qat/config_siluInU8_attnS8_clsU16_one2many.json` | input/output U8      | `cv3` 最后两个尺度的 SiLU、Conv 和分类 logit 为 U16；最终 score 为 U8 | YOLO26n `end2end=false`，常规 NMS 路径                    |
-| `config-qat/config_yolo26nSeg_siluInU16_attnS8.json`     | input U16，output U8 | 不启用 clsU16；mask coefficient 和 proto 保持全局量化                 | 当前 YOLO26n-seg `end2end=true` 推荐配置                  |
-| `config-qat/config_yolo11n_siluInU8_attnS8.json`         | input/output U8      | 不修改                                                                | 当前 YOLO11n 检测图的推荐全 U8 配置                       |
-| `config-qat/config_yolo11n_siluInU16_attnS8.json`        | input U16，output U8 | 不修改                                                                | 当前 YOLO11n 精度优先的已验证配置                         |
-| `config-qat/config_siluInU16_attnS8.json`                | input U16，output U8 | 不修改                                                                | YOLO26 或自定义模型的 U16 基础模板，使用前需重新发现节点  |
-| `config-qat/config_siluInU8_attnS8.json`                 | input/output U8      | 不修改                                                                | YOLO26 或自定义模型的全 U8 基础模板，使用前需重新发现节点 |
+| 配置 | 普通 SiLU | 头部局部配置 | 建议用途 |
+|---|---|---|---|
+| `config-qat/config_siluInU16_attnS8_clsU16.json` | input U16，output U8 | 最后两个尺度的 SiLU、Conv 和 score output 为 U16 | YOLO26n `accuracy` profile，优先保留激活精度 |
+| `config-qat/config_siluInU8_attnS8_clsU16.json` | input/output U8 | 最后两个尺度的 SiLU、Conv 和 score output 为 U16 | YOLO26n `throughput` profile，优先降低带宽和计算开销 |
+| `config-qat/config_siluInU8_attnS8_clsU16_one2many.json` | input/output U8 | `cv3` 最后两个尺度的 SiLU、Conv 和分类 logit 为 U16；最终 score 为 U8 | YOLO26n `end2end=false`，常规 NMS 路径 |
+| `config-qat/config_yolo26nSeg_siluInU16_attnS8.json` | input U16，output U8 | 不启用 clsU16；mask coefficient 和 proto 保持全局量化 | 当前 YOLO26n-seg `end2end=true` 推荐配置 |
+| `config-qat/config_yolo26nObb_siluInU8_attnS8.json` | input/output U8 | 不修改 | 当前 YOLO26n-OBB smoke 推荐配置，双 Attention S8 |
+| `config-qat/config_yolo26nPose_siluInU8_attnS8.json` | input/output U8 | 不修改 | 当前 YOLO26n-Pose smoke 推荐配置，双 Attention S8 |
+| `config-qat/config_yolo26nCls_siluInU8_attnS8.json` | input/output U8 | 不修改 | 当前 YOLO26n-Cls smoke 推荐配置，单 Attention S8 |
+| `config-qat/config_yolo11n_siluInU8_attnS8.json` | input/output U8 | 不修改 | 当前 YOLO11n 检测图的推荐全 U8 配置 |
+| `config-qat/config_yolo11n_siluInU16_attnS8.json` | input U16，output U8 | 不修改 | 当前 YOLO11n 精度优先的已验证配置 |
+| `config-qat/config_siluInU16_attnS8.json` | input U16，output U8 | 不修改 | YOLO26 或自定义模型的 U16 基础模板，使用前需重新发现节点 |
+| `config-qat/config_siluInU8_attnS8.json` | input/output U8 | 不修改 | YOLO26 或自定义模型的全 U8 基础模板，使用前需重新发现节点 |
 
 `train_qat.py` 的 `--profile accuracy|throughput` 仅对应前两项 YOLO26n 推荐配置；
 `--quant-config <json>` 可指定任意配置，且优先于 `--profile`。YOLO11 必须显式使用专用 JSON：全 U8
 `config_yolo11n_siluInU8_attnS8.json` 或精度优先的
 `config_yolo11n_siluInU16_attnS8.json`；两者均保持单 Attention 连续 S8，且不启用 YOLO26 的 clsU16。
 
+> **⚠️ 精度验证范围**
+>
+> 上表中**检测**（YOLO26n/YOLO11n）和**分割**（YOLO26n-seg）的量化配置已通过正式精度实验和上板评估，可作为交付基线。
+> **OBB、Pose 和分类**的配置（`config_yolo26nObb_*`、`config_yolo26nPose_*`、`config_yolo26nCls_*`）仅完成主机侧链路 smoke，
+> **未经正式精度调优，不保证在业务数据上满足精度要求**。使用前须在目标完整数据集上重新训练并评估，必要时通过
+> `$yolo-qat-config-discovery` 重新发现局部量化边界，并经 AXERA 板端验证后才能作为交付结论。
+
 `config-qat/` 是训练 JSON 的唯一存放目录；与其配对的 Pulsar2 转换 JSON 位于 `axera-npu/`，命名和生成规则见
 [qat_deployment.md](./qat_deployment.md)。README 仅保留训练入口和本文链接，避免两处配置表在后续实验中漂移。
+
+新增 OBB、Pose、分类或自定义网络任务时，不应直接套用上述检测配置的 regional 节点或导出 wrapper。先按
+[$skill-yolo-qat-task-onboarding](../.codex/skills/yolo-qat-task-onboarding/SKILL.md) 确认 head、loss、
+validator 与 QAT 输出契约，以 `config-qat/config.json` 完成基础 QAT smoke；仅在链路通过后，再使用
+[$skill-yolo-qat-config-discovery](../.codex/skills/yolo-qat-config-discovery/SKILL.md) 为当前图生成 Attention
+S8 或局部 U16 配置。
 
 #### YOLO11n 后续优化建议
 
@@ -160,18 +176,24 @@ one-to-many 配置必须通过 `--branch cv3` 重新发现分类塔，不能复�
 
 ### 3.3 Attention 模块范围
 
-YOLO26 和 YOLO11 都在 backbone 第 10 层使用 `C2PSA`；其 `PSABlock.Attention` 依次执行 `Q^T @ K` 和
-`V @ attention` 两个 MatMul。YOLO26 还在 P5 的 `C3k2(..., attn=True)` 内使用一个 `PSABlock`。因此，
-YOLO26n 当前有两个 Attention block、四个 MatMul；YOLO11n 当前有一个 Attention block、两个 MatMul。
+**模块拓扑与数量**
 
-每个 Attention 的第一 MatMul output 为 S8；第二 MatMul output 回到 U8。普通未启用 `attn=True` 的 `C3k2`
-虽属于 CSP 类模块，但不包含 MatMul，不需要 `attnS8` regional 配置。具体 FX/ONNX 节点名必须以 discovery
-和导出图为准，不能在自定义网络中沿用 `matmul` 等历史名称。
+- YOLO26 检测/OBB/Pose/分割 和 YOLO11 都在 backbone 第 10 层（`model.10`）使用 `C2PSA`；其 `PSABlock.Attention` 依次执行 `Q^T @ K` 和 `V @ attention` 两个 MatMul。
+- YOLO26 还在 P5 的 `C3k2(..., attn=True)` 内使用一个 `PSABlock`（`model.22`）。
+- 因此，YOLO26n 检测/OBB/Pose 当前有两个 Attention block、四个 MatMul；YOLO11n 当前有一个 Attention block、两个 MatMul。
+- YOLO26n-cls 骨干较短（无 neck/FPN），`C2PSA` 位于 **第 9 层**（`model.9`），仅有**一个** Attention block、两个 MatMul；不含 P5 的第二 `C2PSA`。
 
-YOLO11 的其他规格、改造网络或导出环境变化后不能假设 MatMul 数量不变，必须重新发现节点。标准 YOLO26
-检测交付图还要求导出后 `BatchNormalization=0`、requant 节点为 0；导出阶段会对齐 Split 输入与相关 Reshape
-分支的量化参数，以满足 AXERA 对 Split 输入输出量化参数一致的约束。分割图可能存在独立的 mask-head
-requant，不能套用检测图的零 requant 断言。
+**S8 边界与节点命名**
+
+- 每个 Attention 的第一 MatMul output 为 S8；第二 MatMul output 回到 U8。
+- 普通未启用 `attn=True` 的 `C3k2` 虽属于 CSP 类模块，但不包含 MatMul，不需要 `attnS8` regional 配置。
+- 具体 FX/ONNX 节点名必须以 discovery 和导出图为准，不能在自定义网络中沿用 `matmul` 等历史名称。
+
+**重新发现与导出约束**
+
+- YOLO11 的其他规格、改造网络或导出环境变化后不能假设 MatMul 数量不变，必须重新发现节点。
+- 标准 YOLO26 检测交付图还要求导出后 `BatchNormalization=0`、requant 节点为 0；导出阶段会对齐 Split 输入与相关 Reshape 分支的量化参数，以满足 AXERA 对 Split 输入输出量化参数一致的约束。
+- 分割图可能存在独立的 mask-head requant，不能套用检测图的零 requant 断言。
 
 ## 4. 自定义 YOLO26/YOLO11 网络
 
@@ -180,13 +202,13 @@ requant，不能套用检测图的零 requant 断言。
 
 ### 4.1 已知问题与当前处理结论
 
-| 项目                              | 影响                                                                            | 当前处理结论                                                                  |
-| --------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Regional 配置使用 FX 节点名       | 修改网络后节点编号可能变化，原有局部 U16/S8 配置可能不再命中目标算子            | 暂不自动重映射节点，在本文说明限制；自定义网络导出后重新核对目标 Q/DQ dtype   |
-| Regional 节点未命中时静默跳过     | 模型可能仍能导出，但目标算子回落到全局量化配置                                  | 暂时保留当前行为，在本文明确说明；不能只依据 ONNX 导出成功判断配置正确        |
-| 新增 quantizer 未覆盖的自定义算子 | 可能保持浮点或产生额外 Q/DQ，AXERA 是否支持取决于实际导出图和工具链             | 不属于当前标准 YOLO26 交付范围，不在本次处理                                  |
-| 检测头输出格式固定                | 改变输出数量、尺度或字典结构后，当前导出和测试 wrapper 可能不适用               | 在本文说明输出契约；自定义检测头需要同步适配导出、测试和评估入口              |
-| Attention S8 与 Split/Reshape     | 当前标准图需要保持 Attention 连续 S8 量化域，并满足 AXERA 的 Split 量化参数约束 | 当前 `accuracy`/`throughput` 配置和导出后处理已经覆盖，标准交付图无需额外修改 |
+| 项目 | 影响 | 当前处理结论 |
+|---|---|---|
+| Regional 配置使用 FX 节点名 | 修改网络后节点编号可能变化，原有局部 U16/S8 配置可能不再命中目标算子 | 暂不自动重映射节点，在本文说明限制；自定义网络导出后重新核对目标 Q/DQ dtype |
+| Regional 节点未命中时静默跳过 | 模型可能仍能导出，但目标算子回落到全局量化配置 | 暂时保留当前行为，在本文明确说明；不能只依据 ONNX 导出成功判断配置正确 |
+| 新增 quantizer 未覆盖的自定义算子 | 可能保持浮点或产生额外 Q/DQ，AXERA 是否支持取决于实际导出图和工具链 | 不属于当前标准 YOLO26 交付范围，不在本次处理 |
+| 检测头输出格式固定 | 改变输出数量、尺度或字典结构后，当前导出和测试 wrapper 可能不适用 | 在本文说明输出契约；自定义检测头需要同步适配导出、测试和评估入口 |
+| Attention S8 与 Split/Reshape | 当前标准图需要保持 Attention 连续 S8 量化域，并满足 AXERA 的 Split 量化参数约束 | 当前 `accuracy`/`throughput` 配置和导出后处理已经覆盖，标准交付图无需额外修改 |
 
 以上结论只针对当前已验证的标准交付图。用户修改网络后，可以继续使用通用 quantizer 能力，但原
 profile 中按名称选择的区域不能视为自动适配。
