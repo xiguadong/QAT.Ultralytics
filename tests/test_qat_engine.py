@@ -1,7 +1,6 @@
 try:
     import pytest
 except ModuleNotFoundError:  # pragma: no cover - allows manual execution in lean envs without pytest installed
-
     class _PytestStub:
         class mark:
             @staticmethod
