@@ -26,6 +26,7 @@ from ultralytics.utils import (
     callbacks,
     checks,
 )
+import ultralytics.utils.quantized_decomposed_dequantize_per_channel
 from ultralytics.utils.qat_utils import prepare_pt2e_qat_model, resolve_qat_config_path
 
 
@@ -789,7 +790,9 @@ class Model(torch.nn.Module):
             if args.get("qat"):
                 self.model = self.trainer.model
                 self.ckpt = {}
-                model_args = args if self.trainer.ddp else self.model.args
+                # DetectionTrainer attaches model.args; ClassificationTrainer does not, so fall back to
+                # the training overrides (same source the DDP branch uses) when the model has no args.
+                model_args = args if self.trainer.ddp else getattr(self.model, "args", args)
                 self.overrides = self._reset_ckpt_args(model_args)
             else:
                 ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last
@@ -849,7 +852,6 @@ class Model(torch.nn.Module):
         ckpt_qat_ema = self.ckpt.get("qat_ema") if isinstance(self.ckpt, dict) else None
         if ckpt_qat_ema is not None and effective_args.get("qat_ema", True):
             from ultralytics.utils.torch_utils import ModelEMA
-
             self.trainer.qat_ema = ModelEMA(prepared_model, decay=0.9999, tau=2000)
             self.trainer.qat_ema.ema.load_state_dict(ckpt_qat_ema)
             self.trainer.qat_ema.updates = self.ckpt.get("qat_ema_updates", 0)
@@ -1114,7 +1116,7 @@ class Model(torch.nn.Module):
             >>> model.reset_callbacks()
             # All callbacks are now reset to their default functions
         """
-        for event in callbacks.default_callbacks:
+        for event in callbacks.default_callbacks.keys():
             self.callbacks[event] = [callbacks.default_callbacks[event][0]]
 
     @staticmethod
