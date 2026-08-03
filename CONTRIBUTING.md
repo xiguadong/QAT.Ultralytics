@@ -73,7 +73,9 @@ def example_function(arg1, arg2=4):
     Examples:
         >>> result = example_function(1, 2)  # returns False
     """
-    return arg1 == arg2
+    if arg1 == arg2:
+        return True
+    return False
 ```
 
 #### Example Google-style with type hints
@@ -94,7 +96,9 @@ def example_function(arg1: int, arg2: int = 4) -> bool:
     Examples:
         >>> result = example_function(1, 2)  # returns False
     """
-    return arg1 == arg2
+    if arg1 == arg2:
+        return True
+    return False
 ```
 
 #### Example Single-line
