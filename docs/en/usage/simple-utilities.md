@@ -474,8 +474,6 @@ Also see the [`Annotator` Reference Page](../reference/utils/plotting.md/#ultral
 !!! example "Sweep Annotation using Ultralytics Utilities"
 
     ```python
-    import sys
-
     import cv2
     import numpy as np
 
@@ -489,7 +487,7 @@ Also see the [`Annotator` Reference Page](../reference/utils/plotting.md/#ultral
 
     if not cap.isOpened():
         print("Error: Could not open video.")
-        sys.exit()
+        exit()
 
     # Initialize the video writer object.
     w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
