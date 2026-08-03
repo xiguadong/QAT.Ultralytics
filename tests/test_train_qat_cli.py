@@ -45,3 +45,45 @@ def test_config_selection_requires_profile_or_explicit_config(module):
 def test_relative_project_is_resolved_inside_repository(module):
     assert module.resolve_project_dir(None, "detect") == str(module.ROOT / "runs" / "detect")
     assert module.resolve_project_dir("runs/custom", "detect") == str(module.ROOT / "runs/custom")
+
+
+def test_train_qat_accepts_pose_task():
+    parser_args = [
+        "--task", "pose",
+        "--model", "yolo26n-pose.yaml",
+        "--pretrained", "weights/yolo26n-pose.pt",
+        "--data", "coco8-pose.yaml",
+        "--quant-config", "config-qat/config.json",
+    ]
+
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["train_qat.py", *parser_args]
+        args = train_qat.parse_args()
+    finally:
+        sys.argv = old_argv
+
+    assert args.task == "pose"
+
+
+def test_train_qat_accepts_classify_task():
+    parser_args = [
+        "--task", "classify",
+        "--model", "yolo26n-cls.yaml",
+        "--pretrained", "weights/yolo26n-cls.pt",
+        "--data", "imagenet10",
+        "--quant-config", "config-qat/config.json",
+    ]
+
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["train_qat.py", *parser_args]
+        args = train_qat.parse_args()
+    finally:
+        sys.argv = old_argv
+
+    assert args.task == "classify"
