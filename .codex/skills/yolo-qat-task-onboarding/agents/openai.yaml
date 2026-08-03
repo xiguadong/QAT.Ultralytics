@@ -1,0 +1,4 @@
+interface:
+  display_name: "YOLO QAT 新任务接入"
+  short_description: "接入并验证新的 YOLO PT2E QAT 任务类型。"
+  default_prompt: "为新的 YOLO 网络任务接入 PT2E QAT，完成训练链路与导出结构验收。"
