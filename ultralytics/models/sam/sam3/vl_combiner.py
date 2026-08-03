@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import copy
 
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from .necks import Sam3DualViTDetNeck
@@ -155,8 +155,6 @@ class SAM3VLBackbone(nn.Module):
 
         return output
 
-    def set_imgsz(self, imgsz: list[int] | None = None):
+    def set_imgsz(self, imgsz: list[int] = [1008, 1008]):
         """Set the image size for the vision backbone."""
-        if imgsz is None:
-            imgsz = [1008, 1008]
         self.vision_backbone.set_imgsz(imgsz)
