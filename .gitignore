@@ -219,3 +219,6 @@ calibration_*.npy
 /yolo26_onnx/
 /todos/
 /todos-seg/
+/todos-obb/
+/todos-pose/
+/todos-cls/
