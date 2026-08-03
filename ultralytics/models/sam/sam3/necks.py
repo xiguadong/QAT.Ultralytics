@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import torch
-from torch import nn
+import torch.nn as nn
 
 
 class Sam3DualViTDetNeck(nn.Module):
@@ -126,8 +126,6 @@ class Sam3DualViTDetNeck(nn.Module):
             poss.append(self.position_encoding(feat).to(feat.dtype))
         return outs, poss
 
-    def set_imgsz(self, imgsz: list[int] | None = None):
+    def set_imgsz(self, imgsz: list[int] = [1008, 1008]):
         """Set the image size for the trunk backbone."""
-        if imgsz is None:
-            imgsz = [1008, 1008]
         self.trunk.set_imgsz(imgsz)
