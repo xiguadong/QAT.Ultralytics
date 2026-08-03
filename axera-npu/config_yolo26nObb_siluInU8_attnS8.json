@@ -1,0 +1,97 @@
+{
+  "input": "yolo26_onnx/yolo26n_obb_qat_attnS8_smoke_slim.onnx",
+  "output_dir": "./output_yolo26nObb_siluInU8_attnS8",
+  "model_type": "QuantONNX",
+  "target_hardware": "AX650",
+  "npu_mode": "NPU3",
+  "quant": {
+    "input_configs": [
+      {
+        "tensor_name": "DEFAULT",
+        "calibration_dataset": "/path/to/dataset",
+        "calibration_size": 32,
+        "calibration_mean": [
+          0,
+          0,
+          0
+        ],
+        "calibration_std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "calibration_format": "Binary"
+      }
+    ],
+    "layer_configs": [
+      {
+        "op_type": "Silu",
+        "data_type": "U8"
+      },
+      {
+        "layer_names": [
+          "node_Reshape_744",
+          "node_Split_2300",
+          "node_Transpose_765",
+          "node_MatMul_771",
+          "node_Mul_780",
+          "node_Softmax_786",
+          "node_Transpose_792",
+          "node_Reshape_821",
+          "node_Reshape_1574",
+          "node_Split_2321",
+          "node_Transpose_1593",
+          "node_MatMul_1599",
+          "node_Mul_1607",
+          "node_Softmax_1613",
+          "node_Transpose_1619",
+          "node_Reshape_1648"
+        ],
+        "data_type": "S8",
+        "output_data_type": "S8"
+      },
+      {
+        "layer_names": [
+          "node_Conv_732",
+          "node_Conv_1562"
+        ],
+        "output_data_type": "S8"
+      },
+      {
+        "layer_names": [
+          "node_MatMul_797",
+          "node_Conv_828",
+          "node_MatMul_1624",
+          "node_Conv_1655"
+        ],
+        "data_type": "S8"
+      }
+    ],
+    "conv_bias_data_type": "FP32",
+    "precision_analysis": true,
+    "precision_analysis_method": "PerLayer",
+    "precision_analysis_mode": "NPUBackend"
+  },
+  "input_processors": [
+    {
+      "tensor_name": "DEFAULT",
+      "tensor_layout": "NCHW",
+      "src_layout": "NCHW",
+      "src_dtype": "FP32",
+      "mean": [
+        0,
+        0,
+        0
+      ],
+      "std": [
+        1,
+        1,
+        1
+      ]
+    }
+  ],
+  "output_processors": [],
+  "compiler": {
+    "check": 2
+  }
+}
