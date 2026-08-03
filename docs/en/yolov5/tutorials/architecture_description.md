@@ -34,7 +34,7 @@ To test the speed of `SPP` and `SPPF`, the following code can be used:
 import time
 
 import torch
-from torch import nn
+import torch.nn as nn
 
 
 class SPP(nn.Module):
