@@ -38,13 +38,18 @@ env PYTHONPATH="$PWD" \
 正式训练去掉 smoke 参数，保留默认 50 epoch、640 输入和 noEMA。不得加载其他 profile 的 checkpoint
 续训；profile 或图结构变化后必须从浮点预训练权重重新开始。
 
-## One-to-many 与分割变体
+## 训练变体
+
+### One-to-many
 
 - YOLO26 one-to-many 使用独立配置：先按 `$yolo-qat-config-discovery` 以 `--branch cv3` 重新发现节点，
   再以 `train_qat.py --no-end2end` 训练，并以 `export.py --end2end false` 导出。不要复用 one-to-one 的
   clsU16 节点。
 - one-to-many 的分类 score 是 Sigmoid 后的 U8；分类 logit 的 U16 在 Sigmoid 前生效。结构检查使用
   `--skip-output-check`，输出契约另行验收。
+
+### 分割
+
 - YOLO26n-seg 不使用本节 profile，使用
   `config-qat/config_yolo26nSeg_siluInU16_attnS8.json`（全局 SiLU input U16、Attention S8、无 clsU16）。
   导出命令将 `--task detect` 改为 `--task segment`，并使用分割训练权重和配置。
