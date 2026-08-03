@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run YOLO QAT checkpoint or QuantONNX inference and draw detection or segmentation results."""
+"""Run YOLO QAT checkpoint or QuantONNX inference and draw detection, segmentation, or OBB results."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import cv2
 import numpy as np
 import torch
 
-import ultralytics.utils.quantized_decomposed_dequantize_per_channel  # noqa: F401
 from ultralytics import YOLO
 from ultralytics.data.augment import LetterBox
 from ultralytics.data.utils import IMG_FORMATS
@@ -25,11 +24,16 @@ from ultralytics.utils import nms, ops
 from ultralytics.utils.files import increment_path
 from ultralytics.utils.qat_utils import prepare_pt2e_qat_model, resolve_qat_config_path
 from ultralytics.utils.torch_utils import select_device
+import ultralytics.utils.quantized_decomposed_dequantize_per_channel  # noqa: F401
+
 
 DEFAULT_QAT_MODEL = "runs/detect/exp58-globalSiluU8AttnS8-e2eTrue-noEMA/weights/best.pt"
 TASK_DEFAULTS = {
     "detect": ("yolo26n.yaml", "yolo26n.pt"),
     "segment": ("yolo26n-seg.yaml", "weights/yolo26n-seg.pt"),
+    "obb": ("yolo26n-obb.yaml", "weights/yolo26n-obb.pt"),
+    "pose": ("yolo26n-pose.yaml", "weights/yolo26n-pose.pt"),
+    "classify": ("yolo26n-cls.yaml", "weights/yolo26n-cls.pt"),
 }
 
 
@@ -43,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quant-config", default=None, help="QAT config override; defaults to checkpoint train_args.")
     parser.add_argument("--model-yaml", default=None, help="Reference model architecture; defaults by --task.")
     parser.add_argument("--pretrained", default=None, help="Reference float checkpoint; defaults by --task.")
+    parser.add_argument("--data", default=None, help="Classification dataset for class names (classify task only).")
     parser.add_argument("--device", default="cpu", help="PT2E and decode device, for example cpu, 0, or cuda:0.")
     parser.add_argument("--imgsz", type=int, default=640, help="Square model input size.")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold.")
@@ -79,7 +84,14 @@ def find_images(source: str) -> list[Path]:
 
 def build_reference_model(model_yaml: str, pretrained: str, device: torch.device, task: str):
     pretrained_names = YOLO(pretrained, task=task).names
-    model = YOLO(model_yaml, task=task).load(pretrained)
+    model = YOLO(model_yaml, task=task)
+    if task in {"obb", "pose"}:
+        # Task YAML defaults may differ from the checkpoint head metadata.
+        kwargs = {"nc": len(pretrained_names), "ch": 3}
+        if task == "pose":
+            kwargs["data_kpt_shape"] = YOLO(pretrained, task=task).model.model[-1].kpt_shape
+        model.model = model.task_map[task]["model"](model_yaml, **kwargs)
+    model.load(pretrained)
     float_model = model.model.float().to(device)
     float_model.names = pretrained_names
     float_model.model[-1].end2end = True
@@ -103,8 +115,17 @@ def decode_predictions(raw_predictions, reference_model, task: str) -> Inference
         inference, proto = decoded, None
     if not reference_model.model[-1].end2end:
         # Conventional YOLO heads return [B, 4 + nc (+ nm), N]. Convert to the common detection layout used below.
-        inference = nms.non_max_suppression(inference, conf_thres=0.001, iou_thres=0.7, max_det=300)[0].unsqueeze(0)
-    expected_columns = 6 if task == "detect" else 6 + int(reference_model.model[-1].nm)
+        inference = nms.non_max_suppression(
+            inference,
+            conf_thres=0.001,
+            iou_thres=0.7,
+            max_det=300,
+            rotated=task == "obb",
+        )[0].unsqueeze(0)
+    head = reference_model.model[-1]
+    expected_columns = (
+        7 if task == "obb" else 6 + int(head.nk) if task == "pose" else 6 if task == "detect" else 6 + int(head.nm)
+    )
     if inference.ndim != 3 or inference.shape[-1] != expected_columns:
         raise RuntimeError(f"Unexpected decoded prediction shape: {tuple(inference.shape)}")
     return InferenceOutput(inference, proto)
@@ -172,19 +193,37 @@ class QuantONNXBackend:
         head = self.reference_model.model[-1]
         self.box_channels = 4 * int(getattr(head, "reg_max", 1))
         self.score_channels = len(self.reference_model.names)
+        self.angle_channels = int(getattr(head, "ne", 0))
+        self.keypoint_channels = int(getattr(head, "nk", 0))
 
     def infer(self, image: torch.Tensor) -> InferenceOutput:
         outputs = self.session.run(None, {self.input_name: image.cpu().numpy()})
         output_names = [meta.name for meta in self.session.get_outputs()]
         boxes: dict[int, torch.Tensor] = {}
         scores: dict[int, torch.Tensor] = {}
+        obb_boxes = obb_scores = obb_angle = None
+        pose_boxes = pose_scores = pose_keypoints = None
         mask_coefficient = None
         proto_masks = None
         proto_semseg = None
         nm = int(getattr(self.reference_model.model[-1], "nm", 0))
         for name, output in zip(output_names, outputs):
             tensor = torch.from_numpy(output).to(self.device)
-            if tensor.ndim == 3 and tensor.shape[0] == 1 and tensor.shape[1] == self.box_channels:
+            if self.task == "obb" and tensor.ndim == 3 and tensor.shape[0] == 1:
+                if tensor.shape[1] == self.box_channels:
+                    obb_boxes = tensor
+                elif tensor.shape[1] == self.score_channels:
+                    obb_scores = tensor
+                elif tensor.shape[1] == self.angle_channels:
+                    obb_angle = tensor
+            elif self.task == "pose" and tensor.ndim == 3 and tensor.shape[0] == 1:
+                if tensor.shape[1] == self.box_channels:
+                    pose_boxes = tensor
+                elif tensor.shape[1] == self.score_channels:
+                    pose_scores = tensor
+                elif tensor.shape[1] == self.keypoint_channels:
+                    pose_keypoints = tensor
+            elif tensor.ndim == 3 and tensor.shape[0] == 1 and tensor.shape[1] == self.box_channels:
                 boxes[tensor.shape[2]] = tensor
             elif tensor.ndim == 3 and tensor.shape[0] == 1 and tensor.shape[1] == self.score_channels:
                 scores[tensor.shape[2]] = tensor
@@ -195,6 +234,38 @@ class QuantONNXBackend:
                     proto_masks = tensor
                 elif name == "proto_semseg" or tensor.shape[1] == len(self.reference_model.names):
                     proto_semseg = tensor
+
+        if self.task == "obb":
+            if obb_boxes is None or obb_scores is None or obb_angle is None:
+                raise RuntimeError("OBB QuantONNX must provide concatenated boxes, scores, and angle outputs")
+            if obb_boxes.shape[2] != obb_scores.shape[2] or obb_boxes.shape[2] != obb_angle.shape[2]:
+                raise RuntimeError("OBB QuantONNX outputs must use the same anchor count")
+            head = self.reference_model.model[-1]
+            strides = [int(value) for value in head.stride.tolist()]
+            feats = [
+                torch.zeros(1, 1, self.input_hw[0] // stride, self.input_hw[1] // stride, device=self.device)
+                for stride in strides
+            ]
+            raw_predictions = {
+                "one2one": {"boxes": obb_boxes, "scores": obb_scores, "angle": obb_angle, "feats": feats}
+            }
+            return decode_predictions(raw_predictions, self.reference_model, self.task)
+
+        if self.task == "pose":
+            if pose_boxes is None or pose_scores is None or pose_keypoints is None:
+                raise RuntimeError("Pose QuantONNX must provide concatenated boxes, scores, and keypoints outputs")
+            if pose_boxes.shape[2] != pose_scores.shape[2] or pose_boxes.shape[2] != pose_keypoints.shape[2]:
+                raise RuntimeError("Pose QuantONNX outputs must use the same anchor count")
+            head = self.reference_model.model[-1]
+            strides = [int(value) for value in head.stride.tolist()]
+            feats = [
+                torch.zeros(1, 1, self.input_hw[0] // stride, self.input_hw[1] // stride, device=self.device)
+                for stride in strides
+            ]
+            raw_predictions = {
+                "one2one": {"boxes": pose_boxes, "scores": pose_scores, "kpts": pose_keypoints, "feats": feats}
+            }
+            return decode_predictions(raw_predictions, self.reference_model, self.task)
 
         if boxes.keys() != scores.keys() or len(boxes) != 3:
             raise RuntimeError("Expected three matching box/score outputs from one2one QuantONNX")
@@ -242,8 +313,19 @@ def make_result(
         if task == "segment":
             if inference.proto is None:
                 raise RuntimeError("Segmentation inference did not return mask prototypes")
-            masks = ops.process_mask(inference.proto[0], detections[:, 6:], detections[:, :4], input_hw, upsample=True)
-        detections[:, :4] = ops.scale_boxes(input_hw, detections[:, :4], original.shape[:2])
+            masks = ops.process_mask(
+                inference.proto[0], detections[:, 6:], detections[:, :4], input_hw, upsample=True
+            )
+        detections[:, :4] = ops.scale_boxes(
+            input_hw, detections[:, :4], original.shape[:2], xywh=task == "obb"
+        )
+    if task == "obb":
+        obb = torch.cat([detections[:, :4], detections[:, 6:7], detections[:, 4:6]], dim=1)
+        return Results(original, str(image_path), names, obb=obb.cpu())
+    if task == "pose":
+        keypoints = detections[:, 6:].reshape(len(detections), (detections.shape[1] - 6) // 3, 3)
+        keypoints = ops.scale_coords(input_hw, keypoints, original.shape[:2])
+        return Results(original, str(image_path), names, boxes=detections[:, :6].cpu(), keypoints=keypoints.cpu())
     return Results(
         original,
         str(image_path),
@@ -254,10 +336,31 @@ def make_result(
 
 
 def print_result(index: int, result: Results, elapsed_ms: float) -> None:
+    if result.obb is not None:
+        obb = result.obb
+        count = len(obb)
+        print(f"[{index}] {result.path}: detections={count}, inference={elapsed_ms:.2f} ms")
+        if not count:
+            print("  no detections")
+            return
+        class_ids = obb.cls.int().tolist()
+        counts = Counter(result.names[class_id] for class_id in class_ids)
+        print("  summary: " + ", ".join(f"{name}={number}" for name, number in sorted(counts.items())))
+        for detection_index, detection in enumerate(obb.data, start=1):
+            x, y, width, height, angle, confidence, class_id = detection.tolist()
+            print(
+                f"  #{detection_index}: class={result.names[int(class_id)]} id={int(class_id)} "
+                f"conf={confidence:.4f} xywhr=({x:.1f}, {y:.1f}, {width:.1f}, {height:.1f}, {angle:.3f})"
+            )
+        return
     boxes = result.boxes
     count = len(boxes)
     mask_count = len(result.masks) if result.masks is not None else 0
-    print(f"[{index}] {result.path}: detections={count}, masks={mask_count}, inference={elapsed_ms:.2f} ms")
+    kpt_count = len(result.keypoints) if result.keypoints is not None else 0
+    print(
+        f"[{index}] {result.path}: detections={count}, masks={mask_count}, "
+        f"keypoints={kpt_count}, inference={elapsed_ms:.2f} ms"
+    )
     if not count:
         print("  no detections")
         return
@@ -274,6 +377,114 @@ def print_result(index: int, result: Results, elapsed_ms: float) -> None:
         )
 
 
+def _classify_names(args: argparse.Namespace):
+    """Resolve class-index names for the classification head output."""
+    data = args.data
+    if data is None and Path(args.model).suffix.lower() == ".pt":
+        checkpoint = torch.load(args.model, weights_only=False, map_location="cpu")
+        data = (checkpoint.get("train_args") or {}).get("data")
+    if data:
+        from ultralytics.data.utils import check_cls_dataset
+
+        return check_cls_dataset(data)["names"]
+    return None
+
+
+def _build_classify_qat_backend(args: argparse.Namespace, device: torch.device):
+    """Return a prepared classify QAT graph that emits softmax probabilities."""
+    from ultralytics.data.utils import check_cls_dataset
+
+    checkpoint = torch.load(args.model, weights_only=False, map_location="cpu")
+    train_args = checkpoint.get("train_args") or {}
+    nc = len(check_cls_dataset(train_args["data"])["names"])
+    yolo = YOLO(args.model_yaml, task="classify")
+    yolo.model = yolo.task_map["classify"]["model"](args.model_yaml, nc=nc, ch=3)
+    yolo.load(args.pretrained)
+    float_model = yolo.model.float().to(device).train()
+    config_path = resolve_qat_config_path(args.quant_config or train_args.get("qat_config", ""))
+    if not config_path.is_file():
+        raise FileNotFoundError(f"QAT config not found: {config_path}")
+    _, prepared = prepare_pt2e_qat_model(
+        float_model=float_model,
+        device=device,
+        config_path=str(config_path),
+        imgsz=args.imgsz,
+        dynamic_batch_max=int(train_args.get("qat_dynamic_batch_max", 128)),
+    )
+    prepared = BaseValidator._prepare_pt2e_model_for_eval(prepared)
+    qat_state = checkpoint.get("qat_ema") or checkpoint.get("qat_model")
+    if qat_state is None:
+        raise KeyError("Checkpoint has no qat_ema or qat_model state")
+    load_result = prepared.load_state_dict(qat_state, strict=False)
+    if load_result.missing_keys:
+        raise RuntimeError(f"QAT graph mismatch: missing={len(load_result.missing_keys)}")
+    prepared.apply(torch.ao.quantization.disable_observer)
+    prepared.to(device)
+
+    def infer(image: torch.Tensor) -> torch.Tensor:
+        with torch.inference_mode():
+            return prepared(image).softmax(1)[0].float().cpu()
+
+    return infer, (args.imgsz, args.imgsz)
+
+
+def _build_classify_onnx_backend(args: argparse.Namespace, device: torch.device):
+    """Return an ORT-backed classify inference callable; QuantONNX already emits probabilities."""
+    import onnxruntime as ort
+
+    providers = ["CPUExecutionProvider"]
+    if device.type == "cuda" and "CUDAExecutionProvider" in ort.get_available_providers():
+        providers.insert(0, "CUDAExecutionProvider")
+    session = ort.InferenceSession(args.model, providers=providers)
+    input_meta = session.get_inputs()[0]
+    input_name = input_meta.name
+    input_hw = (input_meta.shape[-2], input_meta.shape[-1])
+    if not all(isinstance(value, int) for value in input_hw):
+        raise RuntimeError(f"Classify QuantONNX must have fixed spatial dimensions, got: {input_meta.shape}")
+
+    def infer(image: torch.Tensor) -> torch.Tensor:
+        output = session.run(None, {input_name: image.cpu().numpy()})[0]
+        # Deploy output is raw logits; apply softmax on host (deploy contract) for readable top-k.
+        return torch.from_numpy(output)[0].float().softmax(0)
+
+    return infer, input_hw
+
+
+def run_classify_inference(args: argparse.Namespace, device: torch.device) -> None:
+    """Classify each image and save Top-5 annotated results (checkpoint or QuantONNX)."""
+    from PIL import Image
+
+    from ultralytics.data.augment import classify_transforms
+
+    image_paths = find_images(args.source)
+    names = _classify_names(args)
+    if Path(args.model).suffix.lower() == ".pt":
+        infer, input_hw = _build_classify_qat_backend(args, device)
+        print(f"Loaded classify QAT checkpoint: {args.model}")
+    else:
+        infer, input_hw = _build_classify_onnx_backend(args, device)
+        print(f"Loaded classify QuantONNX: {args.model} (input={input_hw[0]}x{input_hw[1]})")
+
+    transform = classify_transforms(input_hw[0])
+    output_dir = increment_path(Path(args.project) / args.name, exist_ok=args.exist_ok, mkdir=True)
+    for index, image_path in enumerate(image_paths, start=1):
+        original = cv2.imread(str(image_path))
+        if original is None:
+            raise RuntimeError(f"Failed to read image: {image_path}")
+        image = transform(Image.fromarray(original[..., ::-1])).unsqueeze(0).to(device)
+        start = time.perf_counter()
+        probs = infer(image)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        display_names = names or {i: str(i) for i in range(probs.numel())}
+        result = Results(original, str(image_path), display_names, probs=probs)
+        topk = probs.argsort(descending=True)[:5].tolist()
+        summary = ", ".join(f"{display_names[c]}={float(probs[c]):.3f}" for c in topk)
+        print(f"[{index}] {image_path}: top5=[{summary}], inference={elapsed_ms:.2f} ms")
+        result.save(filename=str(output_dir / image_path.name))
+
+    print(f"Processed {len(image_paths)} image(s). Annotated results saved to: {output_dir.resolve()}")
+
+
 def main() -> None:
     args = parse_args()
     default_yaml, default_pretrained = TASK_DEFAULTS[args.task]
@@ -283,10 +494,14 @@ def main() -> None:
     if not model_path.is_file():
         raise FileNotFoundError(f"Model not found: {model_path}")
     if model_path.suffix.lower() not in {".pt", ".onnx"}:
-        raise ValueError("--model must be a QAT .pt checkpoint or six-output QuantONNX .onnx")
+        raise ValueError("--model must be a QAT .pt checkpoint or task-compatible QuantONNX .onnx")
+
+    device = select_device(args.device)
+    if args.task == "classify":
+        run_classify_inference(args, device)
+        return
 
     image_paths = find_images(args.source)
-    device = select_device(args.device)
     reference_model = build_reference_model(args.model_yaml, args.pretrained, device, args.task)
 
     if model_path.suffix.lower() == ".pt":
